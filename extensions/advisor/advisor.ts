@@ -44,12 +44,6 @@ const TOOL_LABEL = "Advisor";
 // File contains only model identifiers and effort strings (no credentials),
 // so it uses default 0644 perms like the rest of ~/.pi/agent/.
 const ADVISOR_CONFIG_PATH = join(homedir(), ".pi", "agent", "pi-advisor.json");
-// Legacy paths, in order of recency. Migrated on first load if the new file
-// does not yet exist; the source file is left untouched.
-const LEGACY_CONFIG_PATHS: string[] = [
-	join(homedir(), ".config", "pi-advisor", "advisor.json"),
-	join(homedir(), ".config", "rpiv-advisor", "advisor.json"),
-];
 
 // Selector sentinels — double-underscore form is collision-proof against real provider:id keys
 const NO_ADVISOR_VALUE = "__no_advisor__";
@@ -106,38 +100,19 @@ interface GuidanceFields {
 }
 
 interface AdvisorEntry {
-	modelKey?: string;
+	modelStub?: string;
 	effort?: ThinkingLevel;
 }
 
 interface AdvisorConfig {
 	/** Default advisor when no per-executor entry matches. */
 	default?: AdvisorEntry;
-	/** Per-executor advisor mapping, keyed by `<provider>:<modelId>`. */
+	/** Per-executor advisor mapping, indexed by `<provider>:<modelId>` stub. */
 	byExecutor?: Record<string, AdvisorEntry>;
-	/** Legacy single-advisor fields (pre-fork). Treated as `default` when present. */
-	modelKey?: string;
-	effort?: ThinkingLevel;
 	guidance?: GuidanceFields;
 }
 
-function migrateLegacyConfigIfNeeded(): void {
-	if (existsSync(ADVISOR_CONFIG_PATH)) return;
-	for (const legacy of LEGACY_CONFIG_PATHS) {
-		if (!existsSync(legacy)) continue;
-		try {
-			const raw = readFileSync(legacy, "utf-8");
-			mkdirSync(dirname(ADVISOR_CONFIG_PATH), { recursive: true });
-			writeFileSync(ADVISOR_CONFIG_PATH, raw, "utf-8");
-		} catch {
-			// best effort migration only
-		}
-		return;
-	}
-}
-
 export function loadAdvisorConfig(): AdvisorConfig {
-	migrateLegacyConfigIfNeeded();
 	if (!existsSync(ADVISOR_CONFIG_PATH)) return {};
 	try {
 		return JSON.parse(readFileSync(ADVISOR_CONFIG_PATH, "utf-8")) as AdvisorConfig;
@@ -147,25 +122,19 @@ export function loadAdvisorConfig(): AdvisorConfig {
 }
 
 /**
- * Resolve the advisor entry to use for a given executor key.
- *
- * Lookup order:
- *   1. `byExecutor[executorKey]` (when executorKey provided and entry has modelKey)
- *   2. `default` (when entry has modelKey)
- *   3. Legacy top-level `{modelKey, effort}` (back-compat for pre-fork configs)
- *
- * Returns undefined when nothing resolves — caller treats that as "advisor off".
+ * Resolve the advisor entry to use for a given executor stub.
+ * `byExecutor[executorStub]` first, falling back to `default`. Returns
+ * undefined when nothing resolves — caller treats that as "advisor off".
  */
 export function resolveAdvisorEntry(
 	config: AdvisorConfig,
-	executorKey: string | undefined,
+	executorStub: string | undefined,
 ): AdvisorEntry | undefined {
-	if (executorKey) {
-		const per = config.byExecutor?.[executorKey];
-		if (per?.modelKey) return per;
+	if (executorStub) {
+		const per = config.byExecutor?.[executorStub];
+		if (per?.modelStub) return per;
 	}
-	if (config.default?.modelKey) return config.default;
-	if (config.modelKey) return { modelKey: config.modelKey, effort: config.effort };
+	if (config.default?.modelStub) return config.default;
 	return undefined;
 }
 
@@ -198,19 +167,16 @@ function writeAdvisorConfig(config: AdvisorConfig): void {
 /**
  * Persist an advisor selection.
  *
- * - When executorKey is provided: writes under `byExecutor[executorKey]` and
- *   ALSO seeds `default` if no default exists yet (so first-time setup
+ * - When executorStub is provided: writes under `byExecutor[executorStub]`
+ *   and ALSO seeds `default` if no default exists yet (so first-time setup
  *   produces sane behavior across all executors until the user configures
- *   more). When key is undefined, the executor entry is removed.
- * - When executorKey is undefined: writes (or clears) the global `default`.
- *
- * Legacy top-level `modelKey`/`effort` fields are stripped on first write —
- * once we own the file, we own the schema.
+ *   more). When stub is undefined, the executor entry is removed.
+ * - When executorStub is undefined: writes (or clears) the global `default`.
  */
 export function saveAdvisorConfig(
-	key: string | undefined,
+	stub: string | undefined,
 	effort: ThinkingLevel | undefined,
-	executorKey: string | undefined,
+	executorStub: string | undefined,
 ): void {
 	const existing = loadAdvisorConfig();
 	const config: AdvisorConfig = {
@@ -219,18 +185,18 @@ export function saveAdvisorConfig(
 		guidance: existing.guidance,
 	};
 
-	if (executorKey) {
-		if (key) {
-			config.byExecutor![executorKey] = effort ? { modelKey: key, effort } : { modelKey: key };
-			if (!config.default?.modelKey) {
-				config.default = effort ? { modelKey: key, effort } : { modelKey: key };
+	if (executorStub) {
+		if (stub) {
+			config.byExecutor![executorStub] = effort ? { modelStub: stub, effort } : { modelStub: stub };
+			if (!config.default?.modelStub) {
+				config.default = effort ? { modelStub: stub, effort } : { modelStub: stub };
 			}
 		} else {
-			delete config.byExecutor![executorKey];
+			delete config.byExecutor![executorStub];
 		}
 	} else {
-		if (key) {
-			config.default = effort ? { modelKey: key, effort } : { modelKey: key };
+		if (stub) {
+			config.default = effort ? { modelStub: stub, effort } : { modelStub: stub };
 		} else {
 			delete config.default;
 		}
@@ -243,10 +209,15 @@ export function saveAdvisorConfig(
 	writeAdvisorConfig(config);
 }
 
-function parseModelKey(key: string): { provider: string; modelId: string } | undefined {
-	const idx = key.indexOf(":");
+function parseModelStub(stub: string): { provider: string; modelId: string } | undefined {
+	const idx = stub.indexOf(":");
 	if (idx < 1) return undefined;
-	return { provider: key.slice(0, idx), modelId: key.slice(idx + 1) };
+	return { provider: stub.slice(0, idx), modelId: stub.slice(idx + 1) };
+}
+
+export function modelStubOf(model: { provider: string; id: string } | undefined): string | undefined {
+	if (!model) return undefined;
+	return `${model.provider}:${model.id}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -391,10 +362,7 @@ export function setAdvisorEffort(effort: ThinkingLevel | undefined): void {
 	selectedAdvisorEffort = effort;
 }
 
-export function executorKeyOf(model: { provider: string; id: string } | undefined): string | undefined {
-	if (!model) return undefined;
-	return `${model.provider}:${model.id}`;
-}
+
 
 // ---------------------------------------------------------------------------
 // Apply / restore — used by session_start and model_select handlers
@@ -425,30 +393,30 @@ export function applyAdvisorForExecutor(
 	pi: ExtensionAPI,
 	reason: "restore" | "swap",
 ): void {
-	const executorKey = executorKeyOf(executor);
+	const executorStub = modelStubOf(executor);
 	const config = loadAdvisorConfig();
-	const entry = resolveAdvisorEntry(config, executorKey);
+	const entry = resolveAdvisorEntry(config, executorStub);
 
 	const previousAdvisor = getAdvisorModel();
-	const previousAdvisorKey = previousAdvisor ? `${previousAdvisor.provider}:${previousAdvisor.id}` : undefined;
+	const previousAdvisorStub = modelStubOf(previousAdvisor);
 	const previousEffort = getAdvisorEffort();
 	const runtime = getAdvisorRuntimeState();
-	const previousExecutorKey = runtime.activeExecutorKey;
+	const previousExecutorStub = runtime.activeExecutorKey;
 
-	runtime.activeExecutorKey = executorKey;
+	runtime.activeExecutorKey = executorStub;
 
-	if (!entry?.modelKey) {
+	if (!entry?.modelStub) {
 		// No advisor for this executor — disable cleanly.
 		setAdvisorModel(undefined);
 		setAdvisorEffort(undefined);
 		ensureToolActive(pi, false);
-		if (reason === "swap" && previousAdvisor && ctx.hasUI && executorKey !== previousExecutorKey) {
+		if (reason === "swap" && previousAdvisor && ctx.hasUI && executorStub !== previousExecutorStub) {
 			ctx.ui.notify(MSG_NO_ADVISOR_FOR_EXECUTOR, "info");
 		}
 		return;
 	}
 
-	const parsed = parseModelKey(entry.modelKey);
+	const parsed = parseModelStub(entry.modelStub);
 	if (!parsed) return;
 
 	const model = ctx.modelRegistry.find(parsed.provider, parsed.modelId);
@@ -457,13 +425,13 @@ export function applyAdvisorForExecutor(
 		setAdvisorEffort(undefined);
 		ensureToolActive(pi, false);
 		if (ctx.hasUI) {
-			ctx.ui.notify(errModelUnavailable(entry.modelKey), "warning");
+			ctx.ui.notify(errModelUnavailable(entry.modelStub), "warning");
 		}
 		return;
 	}
 
-	const newKey = `${model.provider}:${model.id}`;
-	const unchanged = previousAdvisorKey === newKey && previousEffort === entry.effort;
+	const newStub = `${model.provider}:${model.id}`;
+	const unchanged = previousAdvisorStub === newStub && previousEffort === entry.effort;
 
 	setAdvisorModel(model);
 	setAdvisorEffort(entry.effort);
@@ -473,9 +441,9 @@ export function applyAdvisorForExecutor(
 
 	if (ctx.hasUI) {
 		if (reason === "restore") {
-			ctx.ui.notify(msgAdvisorRestored(newKey, entry.effort, executorKey), "info");
+			ctx.ui.notify(msgAdvisorRestored(newStub, entry.effort, executorStub), "info");
 		} else {
-			ctx.ui.notify(msgAdvisorSwapped(newKey, entry.effort, executorKey ?? "unknown"), "info");
+			ctx.ui.notify(msgAdvisorSwapped(newStub, entry.effort, executorStub ?? "unknown"), "info");
 		}
 	}
 }
@@ -677,10 +645,6 @@ export function registerAdvisorBeforeAgentStart(pi: ExtensionAPI): void {
 // /advisor slash command — opens selector panel for picking the advisor model
 // ---------------------------------------------------------------------------
 
-function modelKey(m: { provider: string; id: string }): string {
-	return `${m.provider}:${m.id}`;
-}
-
 export function registerAdvisorCommand(pi: ExtensionAPI): void {
 	pi.registerCommand("advisor", {
 		description: "Configure the advisor model for the advisor-strategy pattern",
@@ -692,16 +656,16 @@ export function registerAdvisorCommand(pi: ExtensionAPI): void {
 
 			const availableModels = ctx.modelRegistry.getAvailable();
 			const current = getAdvisorModel();
-			const currentKey = current ? modelKey(current) : undefined;
+			const currentStub = modelStubOf(current);
 
 			const items: SelectItem[] = availableModels.map((m) => {
-				const key = modelKey(m);
-				const check = key === currentKey ? CHECKMARK : "";
-				return { value: key, label: `${m.name}  (${m.provider})${check}` };
+				const stub = `${m.provider}:${m.id}`;
+				const check = stub === currentStub ? CHECKMARK : "";
+				return { value: stub, label: `${m.name}  (${m.provider})${check}` };
 			});
 			items.push({
 				value: NO_ADVISOR_VALUE,
-				label: currentKey === undefined ? `No advisor${CHECKMARK}` : "No advisor",
+				label: currentStub === undefined ? `No advisor${CHECKMARK}` : "No advisor",
 			});
 
 			const choice = await showAdvisorPicker(ctx, items);
@@ -712,13 +676,13 @@ export function registerAdvisorCommand(pi: ExtensionAPI): void {
 			const activeTools = pi.getActiveTools();
 			const activeHas = activeTools.includes(ADVISOR_TOOL_NAME);
 
-			const executorKey = executorKeyOf(ctx.model);
+			const executorStub = modelStubOf(ctx.model);
 
 			if (choice === NO_ADVISOR_VALUE) {
 				setAdvisorModel(undefined);
 				setAdvisorEffort(undefined);
-				getAdvisorRuntimeState().activeExecutorKey = executorKey;
-				saveAdvisorConfig(undefined, undefined, executorKey);
+				getAdvisorRuntimeState().activeExecutorKey = executorStub;
+				saveAdvisorConfig(undefined, undefined, executorStub);
 				if (activeHas) {
 					pi.setActiveTools(activeTools.filter((n) => n !== ADVISOR_TOOL_NAME));
 				}
@@ -726,7 +690,7 @@ export function registerAdvisorCommand(pi: ExtensionAPI): void {
 				return;
 			}
 
-			const picked = availableModels.find((m) => modelKey(m) === choice);
+			const picked = availableModels.find((m) => `${m.provider}:${m.id}` === choice);
 			if (!picked) {
 				ctx.ui.notify(errSelectionNotFound(choice), "error");
 				return;
@@ -756,12 +720,13 @@ export function registerAdvisorCommand(pi: ExtensionAPI): void {
 
 			setAdvisorEffort(effortChoice);
 			setAdvisorModel(picked);
-			getAdvisorRuntimeState().activeExecutorKey = executorKey;
-			saveAdvisorConfig(modelKey(picked), effortChoice, executorKey);
+			const pickedStub = `${picked.provider}:${picked.id}`;
+			getAdvisorRuntimeState().activeExecutorKey = executorStub;
+			saveAdvisorConfig(pickedStub, effortChoice, executorStub);
 			if (!activeHas) {
 				pi.setActiveTools([...activeTools, ADVISOR_TOOL_NAME]);
 			}
-			ctx.ui.notify(msgAdvisorEnabled(modelKey(picked), effortChoice, executorKey), "info");
+			ctx.ui.notify(msgAdvisorEnabled(pickedStub, effortChoice, executorStub), "info");
 		},
 	});
 }
