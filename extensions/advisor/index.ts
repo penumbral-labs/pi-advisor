@@ -3,9 +3,10 @@
  *
  * Forked from @juicesharp/rpiv-advisor. Adds per-executor advisor mapping:
  * a different advisor (and reasoning effort) can be configured for each
- * primary/executor model. The mapping lives in
- * `~/.config/pi-advisor/advisor.json` (chmod 0600), with a one-time
- * migration from `~/.config/rpiv-advisor/advisor.json` for existing users.
+ * primary/executor model. The mapping lives in `~/.pi/agent/pi-advisor.json`
+ * (colocated with other pi-plugin config), with a one-time migration from
+ * `~/.config/rpiv-advisor/advisor.json` (or interim
+ * `~/.config/pi-advisor/advisor.json`) for existing users.
  *
  * Lifecycle:
  *   - session_start  → resolve and apply the advisor for the current executor

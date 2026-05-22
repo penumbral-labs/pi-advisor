@@ -23,8 +23,9 @@ pi remove npm:@juicesharp/rpiv-advisor   # if installed
 pi install git:github.com/penumbral-labs/pi-advisor
 ```
 
-Existing `~/.config/rpiv-advisor/advisor.json` is migrated to
-`~/.config/pi-advisor/advisor.json` on first load and treated as the default.
+Existing `~/.config/rpiv-advisor/advisor.json` (or an interim
+`~/.config/pi-advisor/advisor.json`) is migrated to `~/.pi/agent/pi-advisor.json`
+on first load and treated as the default. Legacy files are left in place.
 
 ## Usage
 
@@ -41,7 +42,9 @@ serialized conversation branch to the resolved advisor model.
 
 ## Config schema
 
-`~/.config/pi-advisor/advisor.json` (chmod 0600):
+`~/.pi/agent/pi-advisor.json` (colocated with other pi-plugin config; default
+0644 perms — the file contains model identifiers and effort strings, no
+credentials):
 
 ```json
 {

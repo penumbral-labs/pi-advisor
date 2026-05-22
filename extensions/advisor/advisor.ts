@@ -13,7 +13,7 @@
  * via pi.setActiveTools(). Selection is in-memory and resets each session.
  */
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -40,12 +40,16 @@ import { showAdvisorPicker, showEffortPicker } from "./advisor-ui.js";
 export const ADVISOR_TOOL_NAME = "advisor";
 const TOOL_LABEL = "Advisor";
 
-// Persistence
-const CONFIG_DIR = join(homedir(), ".config", "pi-advisor");
-const ADVISOR_CONFIG_PATH = join(CONFIG_DIR, "advisor.json");
-const LEGACY_CONFIG_DIR = join(homedir(), ".config", "rpiv-advisor");
-const LEGACY_ADVISOR_CONFIG_PATH = join(LEGACY_CONFIG_DIR, "advisor.json");
-const CONFIG_FILE_MODE = 0o600;
+// Persistence — colocates with other pi-plugin config under ~/.pi/agent/.
+// File contains only model identifiers and effort strings (no credentials),
+// so it uses default 0644 perms like the rest of ~/.pi/agent/.
+const ADVISOR_CONFIG_PATH = join(homedir(), ".pi", "agent", "pi-advisor.json");
+// Legacy paths, in order of recency. Migrated on first load if the new file
+// does not yet exist; the source file is left untouched.
+const LEGACY_CONFIG_PATHS: string[] = [
+	join(homedir(), ".config", "pi-advisor", "advisor.json"),
+	join(homedir(), ".config", "rpiv-advisor", "advisor.json"),
+];
 
 // Selector sentinels — double-underscore form is collision-proof against real provider:id keys
 const NO_ADVISOR_VALUE = "__no_advisor__";
@@ -119,18 +123,16 @@ interface AdvisorConfig {
 
 function migrateLegacyConfigIfNeeded(): void {
 	if (existsSync(ADVISOR_CONFIG_PATH)) return;
-	if (!existsSync(LEGACY_ADVISOR_CONFIG_PATH)) return;
-	try {
-		const raw = readFileSync(LEGACY_ADVISOR_CONFIG_PATH, "utf-8");
-		mkdirSync(dirname(ADVISOR_CONFIG_PATH), { recursive: true });
-		writeFileSync(ADVISOR_CONFIG_PATH, raw, "utf-8");
+	for (const legacy of LEGACY_CONFIG_PATHS) {
+		if (!existsSync(legacy)) continue;
 		try {
-			chmodSync(ADVISOR_CONFIG_PATH, CONFIG_FILE_MODE);
+			const raw = readFileSync(legacy, "utf-8");
+			mkdirSync(dirname(ADVISOR_CONFIG_PATH), { recursive: true });
+			writeFileSync(ADVISOR_CONFIG_PATH, raw, "utf-8");
 		} catch {
-			// best effort
+			// best effort migration only
 		}
-	} catch {
-		// best effort migration only
+		return;
 	}
 }
 
@@ -190,11 +192,6 @@ function writeAdvisorConfig(config: AdvisorConfig): void {
 		writeFileSync(ADVISOR_CONFIG_PATH, `${JSON.stringify(config, null, 2)}\n`, "utf-8");
 	} catch {
 		// write may fail on disk-full or permission errors — best effort only
-	}
-	try {
-		chmodSync(ADVISOR_CONFIG_PATH, CONFIG_FILE_MODE);
-	} catch {
-		// chmod may fail on some filesystems — best effort only
 	}
 }
 
