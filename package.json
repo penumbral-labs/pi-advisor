@@ -1,0 +1,44 @@
+{
+	"name": "@penumbral-labs/pi-advisor",
+	"version": "0.1.0",
+	"description": "Advisor-strategy pattern for Pi Agent with per-executor advisor models. Forked from @juicesharp/rpiv-advisor.",
+	"keywords": [
+		"pi-package",
+		"pi-extension",
+		"advisor",
+		"reasoning"
+	],
+	"type": "module",
+	"license": "MIT",
+	"author": "Aaron Small",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/penumbral-labs/pi-advisor.git"
+	},
+	"homepage": "https://github.com/penumbral-labs/pi-advisor#readme",
+	"bugs": {
+		"url": "https://github.com/penumbral-labs/pi-advisor/issues"
+	},
+	"engines": {
+		"node": ">=20.6.0"
+	},
+	"files": [
+		"extensions",
+		"README.md",
+		"LICENSE"
+	],
+	"pi": {
+		"extensions": [
+			"./extensions/advisor/index.ts"
+		]
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-ai": "*",
+		"@earendil-works/pi-coding-agent": "*",
+		"@earendil-works/pi-tui": "*",
+		"typebox": "*"
+	},
+	"publishConfig": {
+		"access": "public"
+	}
+}
