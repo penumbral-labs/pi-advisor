@@ -22,12 +22,11 @@ import { completeSimple, getSupportedThinkingLevels, type Message, type Thinking
 import {
 	type AgentToolResult,
 	type AgentToolUpdateCallback,
-	convertToLlm,
 	type ExtensionAPI,
 	type ExtensionContext,
-	type SessionEntry,
 	type ToolInfo,
 } from "@earendil-works/pi-coding-agent";
+import { buildAdvisorMessages, isVerificationCommand, shouldNudge, type ExecutorSignals } from "./advisor-messages.js";
 import type { SelectItem } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { showAdvisorPicker, showEffortPicker } from "./advisor-ui.js";
@@ -90,6 +89,22 @@ const msgAdvisorSwapped = (label: string, effort: ThinkingLevel | undefined, exe
 const msgConsulting = (label: string, effort: ThinkingLevel | undefined) =>
 	`Consulting advisor (${label}${effort ? `, ${effort}` : ""})…`;
 
+// Run-level defaults
+export const MAX_USES_PER_RUN_DEFAULT = 5;
+const MAX_CONTEXT_MESSAGES_DEFAULT = 18;
+const RECENT_TOOL_SUMMARY_COUNT = 8;
+
+// Stage type and run-event record
+type AdvisorStage = "initial" | "recovery" | "final-check";
+
+export interface RunToolEvent {
+	toolName: string;
+	summary: string;
+	command?: string;
+	isError: boolean;
+	timestamp: number;
+}
+
 // ---------------------------------------------------------------------------
 // Config file persistence (cross-session)
 // ---------------------------------------------------------------------------
@@ -110,6 +125,10 @@ interface AdvisorConfig {
 	/** Per-executor advisor mapping, indexed by `<provider>:<modelId>` stub. */
 	byExecutor?: Record<string, AdvisorEntry>;
 	guidance?: GuidanceFields;
+	/** Max advisor calls per agent run (default: 5). */
+	maxUsesPerRun?: number;
+	/** Max transcript messages forwarded to advisor (default: 18). */
+	maxContextMessages?: number;
 }
 
 export function loadAdvisorConfig(): AdvisorConfig {
@@ -362,6 +381,15 @@ export function setAdvisorEffort(effort: ThinkingLevel | undefined): void {
 	selectedAdvisorEffort = effort;
 }
 
+// Run-level state — reset each agent run via resetRunState() in agent_start handler.
+let runToolEvents: RunToolEvent[] = [];
+let usesThisRun = 0;
+
+export function getRunToolEvents(): RunToolEvent[] { return runToolEvents; }
+export function getUsesThisRun(): number { return usesThisRun; }
+export function resetRunState(): void { runToolEvents = []; usesThisRun = 0; }
+export function pushRunToolEvent(event: RunToolEvent): void { runToolEvents.push(event); }
+
 
 
 // ---------------------------------------------------------------------------
@@ -477,12 +505,137 @@ function buildErrorResult(
 	};
 }
 
+function squeezeWhitespace(text: string): string {
+	return text.replace(/\s+/g, " ").trim();
+}
+
+function extractPrimaryText(content: unknown): string {
+	if (!Array.isArray(content)) return "";
+	return (content as Array<{ type?: string; text?: string }>)
+		.filter((b) => b?.type === "text" && typeof b.text === "string")
+		.map((b) => b.text as string)
+		.join("\n")
+		.trim();
+}
+
+function extractBashExitCode(text: string): number | undefined {
+	const match = text.match(/exit code:\s*(\d+)/i);
+	if (!match) return undefined;
+	const code = Number.parseInt(match[1], 10);
+	return Number.isNaN(code) ? undefined : code;
+}
+
+export function summarizeToolExecution(toolName: string, args: unknown, result: unknown, isError: boolean): RunToolEvent {
+	const text = extractPrimaryText((result as { content?: unknown })?.content);
+	const oneLine = squeezeWhitespace(text).slice(0, 140);
+	switch (toolName) {
+		case "read": {
+			const path = typeof (args as { path?: unknown })?.path === "string"
+				? (args as { path: string }).path
+				: "(unknown path)";
+			return { toolName, summary: `read ${path}`, isError, timestamp: Date.now() };
+		}
+		case "edit":
+		case "write": {
+			const path = typeof (args as { path?: unknown })?.path === "string"
+				? (args as { path: string }).path
+				: "(unknown path)";
+			return { toolName, summary: `${toolName} ${path}`, isError, timestamp: Date.now() };
+		}
+		case "bash": {
+			const command = typeof (args as { command?: unknown })?.command === "string"
+				? squeezeWhitespace((args as { command: string }).command).slice(0, 140)
+				: undefined;
+			const exitCode = extractBashExitCode(text);
+			const suffix = exitCode !== undefined ? ` (exit ${exitCode})` : isError ? " (error)" : "";
+			return {
+				toolName,
+				summary: `$ ${command ?? "(unknown command)"}${suffix}`,
+				command,
+				isError: isError || (exitCode !== undefined && exitCode !== 0),
+				timestamp: Date.now(),
+			};
+		}
+		default:
+			return {
+				toolName,
+				summary: oneLine ? `${toolName}: ${oneLine}` : toolName,
+				isError,
+				timestamp: Date.now(),
+			};
+	}
+}
+
+function buildRecentToolActivity(events: RunToolEvent[]): string {
+	if (events.length === 0) return "";
+	return events
+		.slice(-RECENT_TOOL_SUMMARY_COUNT)
+		.map((e) => `- ${e.summary}`)
+		.join("\n");
+}
+
+function buildExecutorSignals(events: RunToolEvent[]): ExecutorSignals {
+	const mutationsCount = events.filter((e) => e.toolName === "edit" || e.toolName === "write").length;
+	const verificationCommands = events
+		.filter((e) => e.toolName === "bash" && isVerificationCommand(e.command))
+		.map((e) => e.command!);
+	const recentFailures = events
+		.filter((e) => e.isError)
+		.slice(-3)
+		.map((e) => e.summary);
+	let phase: ExecutorSignals["phase"] = "exploring";
+	if (mutationsCount > 0 && verificationCommands.length > 0) {
+		phase = "verifying";
+	} else if (mutationsCount > 0) {
+		phase = "mutating";
+	} else if (recentFailures.length > 0) {
+		phase = "stuck";
+	}
+	return { phase, mutationsCount, verificationCommands, recentFailures };
+}
+
+function detectStage(events: RunToolEvent[], advisorCallsThisRun: number): { stage: AdvisorStage; reason: string } {
+	const hasMutation = events.some((e) => e.toolName === "edit" || e.toolName === "write");
+	const hasVerification = events.some((e) => e.toolName === "bash" && isVerificationCommand(e.command));
+	const recentFailure = [...events].reverse().find((e) => e.isError);
+	const explorationCount = events.filter((e) => e.toolName === "read" || e.toolName === "bash").length;
+	if (hasMutation && hasVerification) {
+		return { stage: "final-check", reason: "Implementation changes exist and verification output is already in the transcript." };
+	}
+	if (recentFailure) {
+		return { stage: "recovery", reason: `Recent failure signal: ${recentFailure.summary}` };
+	}
+	if (hasMutation && advisorCallsThisRun > 1) {
+		return { stage: "recovery", reason: "Implementation has started and the executor is checking course again before finishing." };
+	}
+	if (!hasMutation && explorationCount >= 2) {
+		return { stage: "initial", reason: "Exploratory reads or commands have happened, but the executor has not committed to file changes yet." };
+	}
+	if (hasMutation) {
+		return { stage: "recovery", reason: "Implementation is in progress, but there is not enough verification evidence yet for a final check." };
+	}
+	return { stage: "initial", reason: "The executor is still in the early orientation phase." };
+}
+
 async function executeAdvisor(
 	ctx: ExtensionContext,
 	pi: ExtensionAPI,
 	signal: AbortSignal | undefined,
 	onUpdate: AgentToolUpdateCallback<AdvisorDetails> | undefined,
+	stageOverride?: AdvisorStage,
 ): Promise<AgentToolResult<AdvisorDetails>> {
+	const config = loadAdvisorConfig();
+	const maxUsesPerRun = config.maxUsesPerRun ?? MAX_USES_PER_RUN_DEFAULT;
+	const maxContextMessages = config.maxContextMessages ?? MAX_CONTEXT_MESSAGES_DEFAULT;
+
+	if (usesThisRun >= maxUsesPerRun) {
+		return {
+			content: [{ type: "text", text: `Advisor usage limit reached (${maxUsesPerRun} per run). Continue without advisor guidance.` }],
+			details: { effort: getAdvisorEffort(), errorMessage: "max_uses_exceeded" },
+		};
+	}
+	usesThisRun++;
+
 	const advisor = getAdvisorModel();
 	if (!advisor) {
 		return buildErrorResult(undefined, ERR_NO_MODEL, ERR_NO_MODEL_SELECTED);
@@ -498,17 +651,27 @@ async function executeAdvisor(
 		return buildErrorResult(advisorLabel, errNoApiKey(advisorLabel), errNoApiKeyDetail(advisor.provider));
 	}
 
-	// Live-read every call — advisor runs mid-turn so any message_end snapshot
-	// is always one turn stale. convertToLlm is pass-through for user/assistant/
-	// toolResult (messages.js:111-114), so element refs are stable across calls
-	// via the session store — content-stable output without a snapshot layer.
+	const stageInfo = stageOverride
+		? { stage: stageOverride, reason: "Executor explicitly signaled this stage." }
+		: detectStage(runToolEvents, usesThisRun);
+	const recentToolActivity = buildRecentToolActivity(runToolEvents);
+	const signals = buildExecutorSignals(runToolEvents);
+	// Curated transcript: strips tool results + toolCall blocks, clamps long text,
+	// windows to first+last N messages. In-flight advisor call and user-tail
+	// normalization handled internally by buildAdvisorMessages.
 	const branch = ctx.sessionManager.getBranch();
-	const agentMessages = branch
-		.filter((e): e is SessionEntry & { type: "message" } => e.type === "message")
-		.map((e) => e.message);
-	const branchMessages = ensureUserTailForAdvisor(stripInflightAdvisorCall(convertToLlm(agentMessages)));
+	const advisorMessages = buildAdvisorMessages(
+		branch as unknown as Parameters<typeof buildAdvisorMessages>[0],
+		stageInfo,
+		recentToolActivity,
+		maxContextMessages,
+		signals,
+	) as unknown as Message[];
+	if (advisorMessages.length === 0) {
+		return buildErrorResult(advisorLabel, "No conversation context available for advisor. Continue without advice.", "no_context");
+	}
 	const inventoryMessage = getInventoryMessage(pi.getAllTools());
-	const messages: Message[] = inventoryMessage ? [inventoryMessage, ...branchMessages] : branchMessages;
+	const messages: Message[] = inventoryMessage ? [inventoryMessage, ...advisorMessages] : advisorMessages;
 
 	onUpdate?.({
 		content: [{ type: "text", text: msgConsulting(advisorLabel, effort) }],
@@ -588,18 +751,24 @@ async function executeAdvisor(
 // Tool registration — zero-param schema, curated description/snippet/guidelines
 // ---------------------------------------------------------------------------
 
-const AdvisorParams = Type.Object({});
+const AdvisorParams = Type.Object({
+	stage: Type.Optional(
+		Type.Union([Type.Literal("initial"), Type.Literal("recovery"), Type.Literal("final-check")]),
+	),
+});
 
 const ADVISOR_DESCRIPTION =
 	"Escalate to a stronger reviewer model for guidance. When you need " +
 	"stronger judgment — a complex decision, an ambiguous failure, a problem " +
 	"you're circling without progress — escalate to the advisor model for " +
-	"guidance, then resume. Takes NO parameters — when you call advisor(), " +
-	"your entire conversation history is automatically forwarded. The advisor " +
-	"sees the task, every tool call you've made, every result you've seen.";
+	"guidance, then resume. Optional stage parameter: 'initial' (still exploring), " +
+	"'recovery' (stuck or after failure), 'final-check' (implementation done, before declaring complete). " +
+	"When stage is omitted it is auto-detected from recent tool activity. " +
+	"Your full conversation history is automatically forwarded. " +
+	"The advisor sees the task, every tool call you've made, every result you've seen.";
 
 export const DEFAULT_PROMPT_SNIPPET =
-	"Escalate to a stronger reviewer model for guidance when stuck, before substantive work, or before declaring done";
+	"Escalate to a stronger reviewer model for guidance. Optional stage: 'initial' | 'recovery' | 'final-check' (auto-detected when omitted)";
 
 export const DEFAULT_PROMPT_GUIDELINES: string[] = [
 	"Call `advisor` BEFORE substantive work — before writing, before committing to an interpretation, before building on an assumption. Orientation (finding files, fetching a source, seeing what's there) is not substantive work; writing, editing, and declaring an answer are.",
@@ -608,6 +777,7 @@ export const DEFAULT_PROMPT_GUIDELINES: string[] = [
 	"On tasks longer than a few steps, call `advisor` at least once before committing to an approach and once before declaring done. On short reactive tasks where the next action is dictated by tool output you just read, you don't need to keep calling — the advisor adds most of its value on the first call, before the approach crystallizes.",
 	"Give the advisor's advice serious weight. If you follow a step and it fails empirically, or you have primary-source evidence that contradicts a specific claim, adapt — a passing self-test is not evidence the advice is wrong, it's evidence your test doesn't check what the advice is checking.",
 	"If you've already retrieved data pointing one way and the advisor points another, don't silently switch — surface the conflict in one more `advisor` call (\"I found X, you suggest Y, which constraint breaks the tie?\"). A reconcile call is cheaper than committing to the wrong branch.",
+	"Pass stage: 'initial' when still orienting, stage: 'recovery' when stuck or after a failure, stage: 'final-check' after implementing and verifying. Omit stage to let recent tool activity drive auto-detection.",
 ];
 
 export function registerAdvisorTool(pi: ExtensionAPI): void {
@@ -620,8 +790,8 @@ export function registerAdvisorTool(pi: ExtensionAPI): void {
 		promptGuidelines: guidance.promptGuidelines ?? DEFAULT_PROMPT_GUIDELINES,
 		parameters: AdvisorParams,
 
-		async execute(_toolCallId, _params, signal, onUpdate, ctx) {
-			return executeAdvisor(ctx, pi, signal, onUpdate);
+		async execute(_toolCallId, params, signal, onUpdate, ctx) {
+			return executeAdvisor(ctx, pi, signal, onUpdate, params.stage);
 		},
 	});
 }

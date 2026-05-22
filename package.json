@@ -9,6 +9,9 @@
 		"reasoning"
 	],
 	"type": "module",
+	"scripts": {
+		"test": "node --experimental-strip-types --test tests/*.test.mjs"
+	},
 	"license": "MIT",
 	"author": "Aaron Small",
 	"repository": {

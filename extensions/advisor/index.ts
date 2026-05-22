@@ -14,16 +14,49 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
+	ADVISOR_TOOL_NAME,
 	applyAdvisorForExecutor,
+	getAdvisorModel,
+	getRunToolEvents,
+	getUsesThisRun,
+	loadAdvisorConfig,
+	MAX_USES_PER_RUN_DEFAULT,
+	pushRunToolEvent,
 	registerAdvisorBeforeAgentStart,
 	registerAdvisorCommand,
 	registerAdvisorTool,
+	resetRunState,
+	summarizeToolExecution,
 } from "./advisor.js";
+import { shouldNudge } from "./advisor-messages.js";
 
 export default function (pi: ExtensionAPI) {
 	registerAdvisorTool(pi);
 	registerAdvisorCommand(pi);
 	registerAdvisorBeforeAgentStart(pi);
+
+	const toolArgsById = new Map<string, unknown>();
+
+	pi.on("agent_start", async (_event, ctx) => {
+		resetRunState();
+		toolArgsById.clear();
+		ctx.ui.setStatus("advisor-nudge", undefined);
+	});
+
+	pi.on("tool_execution_start", async (event) => {
+		toolArgsById.set(event.toolCallId, event.args);
+	});
+
+	pi.on("tool_execution_end", async (event, ctx) => {
+		if (event.toolName === ADVISOR_TOOL_NAME) return;
+		const args = toolArgsById.get(event.toolCallId);
+		toolArgsById.delete(event.toolCallId);
+		pushRunToolEvent(summarizeToolExecution(event.toolName, args, event.result, event.isError));
+		const config = loadAdvisorConfig();
+		const maxUsesPerRun = config.maxUsesPerRun ?? MAX_USES_PER_RUN_DEFAULT;
+		const hint = shouldNudge(getRunToolEvents(), getUsesThisRun(), getAdvisorModel() !== undefined, maxUsesPerRun);
+		ctx.ui.setStatus("advisor-nudge", hint ?? undefined);
+	});
 
 	pi.on("session_start", async (_event, ctx) => {
 		applyAdvisorForExecutor(ctx.model, ctx, pi, "restore");
