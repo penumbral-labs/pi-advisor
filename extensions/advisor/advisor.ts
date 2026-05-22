@@ -270,11 +270,13 @@ export const ADVISOR_SYSTEM_PROMPT = readFileSync(
 // only when the set of registered tool names changes.
 // ---------------------------------------------------------------------------
 
-const ADVISOR_STATE_KEY = Symbol.for("rpiv-advisor");
+const ADVISOR_STATE_KEY = Symbol.for("penumbral-pi-advisor");
 
 interface AdvisorState {
 	inventorySignature?: string;
 	inventoryMessage?: Message;
+	/** Executor key the current advisor was last resolved for. Survives module re-import on /new, /fork, /resume. */
+	activeExecutorKey?: string;
 }
 
 function getAdvisorRuntimeState(): AdvisorState {
@@ -375,8 +377,6 @@ export function getInventoryMessage(tools: ToolInfo[]): Message | undefined {
 
 let selectedAdvisor: Model<Api> | undefined;
 let selectedAdvisorEffort: ThinkingLevel | undefined;
-/** Tracks the executor key the current advisor was resolved for, so model_select can decide whether to swap. */
-let activeExecutorKey: string | undefined;
 
 export function getAdvisorModel(): Model<Api> | undefined {
 	return selectedAdvisor;
@@ -435,9 +435,10 @@ export function applyAdvisorForExecutor(
 	const previousAdvisor = getAdvisorModel();
 	const previousAdvisorKey = previousAdvisor ? `${previousAdvisor.provider}:${previousAdvisor.id}` : undefined;
 	const previousEffort = getAdvisorEffort();
-	const previousExecutorKey = activeExecutorKey;
+	const runtime = getAdvisorRuntimeState();
+	const previousExecutorKey = runtime.activeExecutorKey;
 
-	activeExecutorKey = executorKey;
+	runtime.activeExecutorKey = executorKey;
 
 	if (!entry?.modelKey) {
 		// No advisor for this executor — disable cleanly.
@@ -719,7 +720,7 @@ export function registerAdvisorCommand(pi: ExtensionAPI): void {
 			if (choice === NO_ADVISOR_VALUE) {
 				setAdvisorModel(undefined);
 				setAdvisorEffort(undefined);
-				activeExecutorKey = executorKey;
+				getAdvisorRuntimeState().activeExecutorKey = executorKey;
 				saveAdvisorConfig(undefined, undefined, executorKey);
 				if (activeHas) {
 					pi.setActiveTools(activeTools.filter((n) => n !== ADVISOR_TOOL_NAME));
@@ -758,7 +759,7 @@ export function registerAdvisorCommand(pi: ExtensionAPI): void {
 
 			setAdvisorEffort(effortChoice);
 			setAdvisorModel(picked);
-			activeExecutorKey = executorKey;
+			getAdvisorRuntimeState().activeExecutorKey = executorKey;
 			saveAdvisorConfig(modelKey(picked), effortChoice, executorKey);
 			if (!activeHas) {
 				pi.setActiveTools([...activeTools, ADVISOR_TOOL_NAME]);
