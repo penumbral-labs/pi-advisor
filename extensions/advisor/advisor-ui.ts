@@ -13,6 +13,11 @@ import { Container, type SelectItem, SelectList, Spacer, Text } from "@earendil-
 const MAX_VISIBLE_ROWS = 10;
 const NAV_HINT = "↑↓ navigate • enter select • esc cancel";
 
+const MAPPINGS_HEADER_TITLE = "Advisor Mappings";
+const MAPPINGS_HEADER_PROSE =
+	"Each executor can have a different advisor model. Select an executor " +
+	"to configure its advisor pairing. The active executor is marked.";
+
 const ADVISOR_HEADER_TITLE = "Advisor Tool";
 const ADVISOR_HEADER_PROSE_1 =
 	"When the active model needs stronger judgment — a complex decision, an ambiguous " +
@@ -57,6 +62,32 @@ function buildSelectPanel(theme: Theme, title: string, proseLines: string[], sel
 	container.addChild(new Spacer(1));
 	container.addChild(border());
 	return container;
+}
+
+export async function showMappingsPicker(
+	ctx: ExtensionContext,
+	items: SelectItem[],
+	initialIndex?: number,
+): Promise<string | null> {
+	return ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
+		const selectList = new SelectList(items, Math.min(items.length, MAX_VISIBLE_ROWS), selectListTheme(theme));
+		if (initialIndex !== undefined && initialIndex >= 0) {
+			selectList.setSelectedIndex(initialIndex);
+		}
+		selectList.onSelect = (item) => done(item.value);
+		selectList.onCancel = () => done(null);
+
+		const container = buildSelectPanel(theme, MAPPINGS_HEADER_TITLE, [MAPPINGS_HEADER_PROSE], selectList);
+
+		return {
+			render: (w) => container.render(w),
+			invalidate: () => container.invalidate(),
+			handleInput: (data) => {
+				selectList.handleInput(data);
+				tui.requestRender();
+			},
+		};
+	});
 }
 
 export async function showAdvisorPicker(ctx: ExtensionContext, items: SelectItem[]): Promise<string | null> {

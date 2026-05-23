@@ -29,7 +29,7 @@ import {
 import { buildAdvisorMessages, isVerificationCommand, shouldNudge, type ExecutorSignals } from "./advisor-messages.js";
 import type { SelectItem } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { showAdvisorPicker, showEffortPicker } from "./advisor-ui.js";
+import { showAdvisorPicker, showEffortPicker, showMappingsPicker } from "./advisor-ui.js";
 
 // ---------------------------------------------------------------------------
 // Constants — grouped by concern, flat named consts (no namespaced objects)
@@ -47,6 +47,7 @@ const ADVISOR_CONFIG_PATH = join(homedir(), ".pi", "agent", "pi-advisor.json");
 // Selector sentinels — double-underscore form is collision-proof against real provider:id keys
 const NO_ADVISOR_VALUE = "__no_advisor__";
 const OFF_VALUE = "__off__";
+const DEFAULT_EXECUTOR_VALUE = "__default__";
 
 // Effort levels
 const BASE_EFFORT_LEVELS: ThinkingLevel[] = ["minimal", "low", "medium", "high"];
@@ -86,6 +87,10 @@ const msgAdvisorRestored = (label: string, effort: ThinkingLevel | undefined, ex
 	`Advisor restored: ${label}${effort ? `, ${effort}` : ""}${executorKey ? ` (for ${executorKey})` : ""}`;
 const msgAdvisorSwapped = (label: string, effort: ThinkingLevel | undefined, executorKey: string) =>
 	`Advisor swapped to ${label}${effort ? `, ${effort}` : ""} (executor: ${executorKey})`;
+const msgSavedForExecutor = (executorStub: string, advisorStub: string, effort: ThinkingLevel | undefined) =>
+	`Saved for ${executorStub}: ${advisorStub}${effort ? ` / ${effort}` : ""}`;
+const msgClearedForExecutor = (executorStub: string) =>
+	`Advisor cleared for ${executorStub}`;
 const msgConsulting = (label: string, effort: ThinkingLevel | undefined) =>
 	`Consulting advisor (${label}${effort ? `, ${effort}` : ""})…`;
 
@@ -812,12 +817,12 @@ export function registerAdvisorBeforeAgentStart(pi: ExtensionAPI): void {
 }
 
 // ---------------------------------------------------------------------------
-// /advisor slash command — opens selector panel for picking the advisor model
+// /advisor slash command — mappings overview → model picker → effort picker
 // ---------------------------------------------------------------------------
 
 export function registerAdvisorCommand(pi: ExtensionAPI): void {
 	pi.registerCommand("advisor", {
-		description: "Configure the advisor model for the advisor-strategy pattern",
+		description: "Configure per-executor advisor model pairings",
 		handler: async (_args, ctx) => {
 			if (!ctx.hasUI) {
 				ctx.ui.notify(MSG_REQUIRES_INTERACTIVE, "error");
@@ -825,38 +830,78 @@ export function registerAdvisorCommand(pi: ExtensionAPI): void {
 			}
 
 			const availableModels = ctx.modelRegistry.getAvailable();
-			const current = getAdvisorModel();
-			const currentStub = modelStubOf(current);
+			const config = loadAdvisorConfig();
+			const executorStubActive = modelStubOf(ctx.model);
+
+			// Helper: human-readable label for an advisor entry.
+			function advisorLabel(entry: { modelStub?: string; effort?: ThinkingLevel } | undefined): string {
+				if (!entry?.modelStub) return "—";
+				const parsed = parseModelStub(entry.modelStub);
+				const model = parsed
+					? availableModels.find((m) => m.provider === parsed.provider && m.id === parsed.modelId)
+					: undefined;
+				const name = model?.name ?? entry.modelStub;
+				return `${name}${entry.effort ? ` / ${entry.effort}` : ""}`;
+			}
+
+			// --- Step 1: Mappings overview ---
+			const mappingItems: SelectItem[] = availableModels.map((m) => {
+				const stub = `${m.provider}:${m.id}`;
+				const isActive = stub === executorStubActive;
+				const entry = config.byExecutor?.[stub];
+				return {
+					value: stub,
+					label: `${m.name}  (${m.provider})${isActive ? CHECKMARK : ""}    \u2192  ${advisorLabel(entry)}`,
+				};
+			});
+			mappingItems.push({
+				value: DEFAULT_EXECUTOR_VALUE,
+				label: `[default fallback]    \u2192  ${advisorLabel(config.default)}`,
+			});
+
+			const initialIdx = mappingItems.findIndex((item) => item.value === executorStubActive);
+			const executorChoice = await showMappingsPicker(ctx, mappingItems, initialIdx >= 0 ? initialIdx : undefined);
+			if (!executorChoice) return;
+
+			// executorStub: undefined means "default", string means a specific executor
+			const executorStub = executorChoice === DEFAULT_EXECUTOR_VALUE ? undefined : executorChoice;
+
+			// The active session's in-memory advisor needs updating when:
+			// - configuring the active executor directly, OR
+			// - configuring default AND active executor has no specific byExecutor entry
+			const executorIsActive =
+				executorStub === executorStubActive ||
+				(executorStub === undefined && !config.byExecutor?.[executorStubActive ?? ""]?.modelStub);
+
+			// --- Step 2: Advisor model picker ---
+			const currentEntry = executorStub ? config.byExecutor?.[executorStub] : config.default;
+			const currentAdvisorStub = currentEntry?.modelStub;
+			const currentAdvisorEffort = currentEntry?.effort;
 
 			const items: SelectItem[] = availableModels.map((m) => {
 				const stub = `${m.provider}:${m.id}`;
-				const check = stub === currentStub ? CHECKMARK : "";
+				const check = stub === currentAdvisorStub ? CHECKMARK : "";
 				return { value: stub, label: `${m.name}  (${m.provider})${check}` };
 			});
 			items.push({
 				value: NO_ADVISOR_VALUE,
-				label: currentStub === undefined ? `No advisor${CHECKMARK}` : "No advisor",
+				label: currentAdvisorStub === undefined ? `No advisor${CHECKMARK}` : "No advisor",
 			});
 
 			const choice = await showAdvisorPicker(ctx, items);
-			if (!choice) {
-				return;
-			}
-
-			const activeTools = pi.getActiveTools();
-			const activeHas = activeTools.includes(ADVISOR_TOOL_NAME);
-
-			const executorStub = modelStubOf(ctx.model);
+			if (!choice) return;
 
 			if (choice === NO_ADVISOR_VALUE) {
-				setAdvisorModel(undefined);
-				setAdvisorEffort(undefined);
-				getAdvisorRuntimeState().activeExecutorKey = executorStub;
 				saveAdvisorConfig(undefined, undefined, executorStub);
-				if (activeHas) {
-					pi.setActiveTools(activeTools.filter((n) => n !== ADVISOR_TOOL_NAME));
+				if (executorIsActive) {
+					setAdvisorModel(undefined);
+					setAdvisorEffort(undefined);
+					getAdvisorRuntimeState().activeExecutorKey = executorStubActive;
+					ensureToolActive(pi, false);
+					ctx.ui.notify(MSG_ADVISOR_DISABLED, "info");
+				} else {
+					ctx.ui.notify(msgClearedForExecutor(executorStub!), "info");
 				}
-				ctx.ui.notify(MSG_ADVISOR_DISABLED, "info");
 				return;
 			}
 
@@ -866,7 +911,7 @@ export function registerAdvisorCommand(pi: ExtensionAPI): void {
 				return;
 			}
 
-			// Effort picker — only for reasoning-capable models
+			// --- Step 3: Effort picker ---
 			let effortChoice: ThinkingLevel | undefined;
 			if (picked.reasoning) {
 				const levels = getSupportedThinkingLevels(picked).includes("xhigh")
@@ -881,22 +926,23 @@ export function registerAdvisorCommand(pi: ExtensionAPI): void {
 					})),
 				];
 
-				const effortResult = await showEffortPicker(ctx, effortItems, getAdvisorEffort(), DEFAULT_EFFORT);
-				if (!effortResult) {
-					return;
-				}
+				const effortResult = await showEffortPicker(ctx, effortItems, currentAdvisorEffort, DEFAULT_EFFORT);
+				if (!effortResult) return;
 				effortChoice = effortResult === OFF_VALUE ? undefined : (effortResult as ThinkingLevel);
 			}
 
-			setAdvisorEffort(effortChoice);
-			setAdvisorModel(picked);
 			const pickedStub = `${picked.provider}:${picked.id}`;
-			getAdvisorRuntimeState().activeExecutorKey = executorStub;
 			saveAdvisorConfig(pickedStub, effortChoice, executorStub);
-			if (!activeHas) {
-				pi.setActiveTools([...activeTools, ADVISOR_TOOL_NAME]);
+
+			if (executorIsActive) {
+				setAdvisorModel(picked);
+				setAdvisorEffort(effortChoice);
+				getAdvisorRuntimeState().activeExecutorKey = executorStubActive;
+				ensureToolActive(pi, true);
+				ctx.ui.notify(msgAdvisorEnabled(pickedStub, effortChoice, executorStub ?? "default"), "info");
+			} else {
+				ctx.ui.notify(msgSavedForExecutor(executorStub!, pickedStub, effortChoice), "info");
 			}
-			ctx.ui.notify(msgAdvisorEnabled(pickedStub, effortChoice, executorStub), "info");
 		},
 	});
 }
