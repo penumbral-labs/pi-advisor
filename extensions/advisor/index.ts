@@ -17,6 +17,7 @@ import {
 	ADVISOR_TOOL_NAME,
 	applyAdvisorForExecutor,
 	getAdvisorModel,
+	getNudgedThisRun,
 	getRunToolEvents,
 	getUsesThisRun,
 	loadAdvisorConfig,
@@ -26,6 +27,7 @@ import {
 	registerAdvisorCommand,
 	registerAdvisorTool,
 	resetRunState,
+	setNudgedThisRun,
 	summarizeToolExecution,
 } from "./advisor.js";
 import { shouldNudge } from "./advisor-messages.js";
@@ -55,7 +57,21 @@ export default function (pi: ExtensionAPI) {
 		const config = loadAdvisorConfig();
 		const maxUsesPerRun = config.maxUsesPerRun ?? MAX_USES_PER_RUN_DEFAULT;
 		const hint = shouldNudge(getRunToolEvents(), getUsesThisRun(), getAdvisorModel() !== undefined, maxUsesPerRun);
-		ctx.ui.setStatus("advisor-nudge", hint ?? undefined);
+		// Inject the nudge into the agent's context once per run so the model
+		// actually sees it. Delivered as `followUp` so it lands at a natural
+		// pause rather than mid-tool-streak. The footer flashes a brief
+		// "advisor nudged" banner just on the firing event, then clears on the
+		// next tool tick — no sticky hint text.
+		if (hint && !getNudgedThisRun()) {
+			setNudgedThisRun(true);
+			pi.sendMessage(
+				{ customType: "advisor-nudge", content: hint, display: true },
+				{ deliverAs: "followUp" },
+			);
+			ctx.ui.setStatus("advisor-nudge", "advisor nudged ↗");
+		} else if (getNudgedThisRun()) {
+			ctx.ui.setStatus("advisor-nudge", undefined);
+		}
 	});
 
 	pi.on("session_start", async (_event, ctx) => {

@@ -154,9 +154,13 @@ test("shouldNudge: no mutations → null", () => {
 	assert.equal(shouldNudge(events, 0, true, 3), null);
 });
 
-test("shouldNudge: mutations with no verification → hint", () => {
+test("shouldNudge: mutations with no verification → hint addressed to the agent", () => {
 	const events = [{ toolName: "read" }, { toolName: "edit" }];
-	assert.match(shouldNudge(events, 0, true, 3), /Code changed, tests not run/);
+	const hint = shouldNudge(events, 0, true, 3);
+	assert.match(hint, /no test\/build\/lint command has run yet/);
+	// Speaks to whoever ends up reading it (agent or human) without pretending
+	// the prior "Consider advisor(...)" tool-call syntax was an instruction.
+	assert.match(hint, /advisor\(\{stage: 'final-check'\}\)/);
 });
 
 test("shouldNudge: mutations with verification → null", () => {

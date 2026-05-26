@@ -389,10 +389,15 @@ export function setAdvisorEffort(effort: ThinkingLevel | undefined): void {
 // Run-level state — reset each agent run via resetRunState() in agent_start handler.
 let runToolEvents: RunToolEvent[] = [];
 let usesThisRun = 0;
+// Tracks whether we've already injected the agent-facing nudge this run, so a
+// long edit streak doesn't pile up duplicate nudges in the model's context.
+let nudgedThisRun = false;
 
 export function getRunToolEvents(): RunToolEvent[] { return runToolEvents; }
 export function getUsesThisRun(): number { return usesThisRun; }
-export function resetRunState(): void { runToolEvents = []; usesThisRun = 0; }
+export function getNudgedThisRun(): boolean { return nudgedThisRun; }
+export function setNudgedThisRun(value: boolean): void { nudgedThisRun = value; }
+export function resetRunState(): void { runToolEvents = []; usesThisRun = 0; nudgedThisRun = false; }
 export function pushRunToolEvent(event: RunToolEvent): void { runToolEvents.push(event); }
 
 

@@ -96,7 +96,7 @@ export function shouldNudge(
 	const hasVerification = events.some((e) => e.toolName === "bash" && isVerificationCommand(e.command));
 
 	if (hasMutation && !hasVerification) {
-		return "Code changed, tests not run. Consider advisor({stage: 'final-check'})";
+		return "Code changed but no test/build/lint command has run yet this turn. Before declaring this complete, either run verification yourself or call advisor({stage: 'final-check'}) for a second opinion.";
 	}
 	return null;
 }
