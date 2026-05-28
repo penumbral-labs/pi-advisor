@@ -149,31 +149,127 @@ test("signals block reflects mutations, verifications, and failures", () => {
 // shouldNudge
 // ---------------------------------------------------------------------------
 
-test("shouldNudge: no mutations → null", () => {
-	const events = [{ toolName: "read", command: undefined }];
-	assert.equal(shouldNudge(events, 0, true, 3), null);
+// ---------------------------------------------------------------------------
+// shouldNudge — guard conditions
+// ---------------------------------------------------------------------------
+
+test("shouldNudge: advisor not enabled → null", () => {
+	const events = [{ toolName: "read" }, { toolName: "read" }, { toolName: "read" }, { toolName: "edit" }];
+	assert.equal(shouldNudge(events, 0, false, 5), null);
 });
 
-test("shouldNudge: mutations with no verification → hint addressed to the agent", () => {
-	const events = [{ toolName: "read" }, { toolName: "edit" }];
-	const hint = shouldNudge(events, 0, true, 3);
-	assert.match(hint, /no test\/build\/lint command has run yet/);
-	// Speaks to whoever ends up reading it (agent or human) without pretending
-	// the prior "Consider advisor(...)" tool-call syntax was an instruction.
-	assert.match(hint, /advisor\(\{stage: 'final-check'\}\)/);
-});
-
-test("shouldNudge: mutations with verification → null", () => {
-	const events = [{ toolName: "edit" }, { toolName: "bash", command: "npm test" }];
-	assert.equal(shouldNudge(events, 0, true, 3), null);
-});
-
-test("shouldNudge: advisor disabled → null", () => {
-	const events = [{ toolName: "edit" }];
-	assert.equal(shouldNudge(events, 0, false, 3), null);
+test("shouldNudge: cfg.disabled → null", () => {
+	const events = [{ toolName: "read" }, { toolName: "read" }, { toolName: "read" }, { toolName: "edit" }];
+	assert.equal(shouldNudge(events, 0, true, 5, { disabled: true }), null);
 });
 
 test("shouldNudge: max uses reached → null", () => {
-	const events = [{ toolName: "edit" }];
-	assert.equal(shouldNudge(events, 3, true, 3), null);
+	const events = [{ toolName: "edit" }, { toolName: "edit" }, { toolName: "edit" }, { toolName: "edit" }];
+	assert.equal(shouldNudge(events, 5, true, 5), null);
+});
+
+test("shouldNudge: advisor already consulted this run → null", () => {
+	const events = [{ toolName: "read" }, { toolName: "read" }, { toolName: "read" }, { toolName: "edit" }];
+	assert.equal(shouldNudge(events, 1, true, 5), null);
+});
+
+// ---------------------------------------------------------------------------
+// shouldNudge — trigger 1: pre-execution
+// ---------------------------------------------------------------------------
+
+test("shouldNudge: pre-execution — first write after enough exploration → hint", () => {
+	const events = [
+		{ toolName: "read" }, { toolName: "bash" }, { toolName: "read" },
+		{ toolName: "edit" },
+	];
+	const hint = shouldNudge(events, 0, true, 5);
+	assert.ok(hint !== null, "expected a hint");
+	assert.match(hint, /advisor\(\{stage: 'initial'\}\)/);
+});
+
+test("shouldNudge: pre-execution — first write but insufficient exploration → null", () => {
+	const events = [{ toolName: "read" }, { toolName: "read" }, { toolName: "edit" }];
+	// Only 2 exploration calls before the write; default threshold is 3
+	assert.equal(shouldNudge(events, 0, true, 5), null);
+});
+
+test("shouldNudge: pre-execution — respects custom threshold", () => {
+	const events = [{ toolName: "read" }, { toolName: "edit" }];
+	// 1 exploration call; threshold lowered to 1 via config
+	const hint = shouldNudge(events, 0, true, 5, { preExecutionMinExploration: 1 });
+	assert.ok(hint !== null);
+	assert.match(hint, /advisor/);
+});
+
+test("shouldNudge: pre-execution — second mutation does not re-fire", () => {
+	// 3 reads then 2 writes; trigger fires only on mutationCount === 1
+	const events = [
+		{ toolName: "read" }, { toolName: "read" }, { toolName: "read" },
+		{ toolName: "edit" }, { toolName: "edit" },
+	];
+	// mutationCount is 2 here, so pre-execution trigger doesn't apply
+	// and mutation burst threshold (default 4) not reached yet → null
+	assert.equal(shouldNudge(events, 0, true, 5), null);
+});
+
+// ---------------------------------------------------------------------------
+// shouldNudge — trigger 2: mutation burst
+// ---------------------------------------------------------------------------
+
+test("shouldNudge: mutation burst — fires exactly at threshold", () => {
+	const events = [
+		{ toolName: "edit" }, { toolName: "edit" }, { toolName: "edit" }, { toolName: "edit" },
+	];
+	const hint = shouldNudge(events, 0, true, 5);
+	assert.ok(hint !== null);
+	assert.match(hint, /4 code changes/);
+});
+
+test("shouldNudge: mutation burst — below threshold → null", () => {
+	const events = [{ toolName: "edit" }, { toolName: "edit" }, { toolName: "edit" }];
+	assert.equal(shouldNudge(events, 0, true, 5), null);
+});
+
+test("shouldNudge: mutation burst — above threshold does not re-fire", () => {
+	// 5 mutations; burst fires at exactly 4, not at 5
+	const events = [
+		{ toolName: "edit" }, { toolName: "edit" }, { toolName: "edit" },
+		{ toolName: "edit" }, { toolName: "edit" },
+	];
+	assert.equal(shouldNudge(events, 0, true, 5), null);
+});
+
+test("shouldNudge: mutation burst — respects custom threshold", () => {
+	const events = [{ toolName: "edit" }, { toolName: "edit" }];
+	const hint = shouldNudge(events, 0, true, 5, { mutationBurst: 2 });
+	assert.ok(hint !== null);
+	assert.match(hint, /2 code changes/);
+});
+
+// ---------------------------------------------------------------------------
+// shouldNudge — trigger 3: long run
+// ---------------------------------------------------------------------------
+
+test("shouldNudge: long run — fires exactly at threshold", () => {
+	const events = Array.from({ length: 15 }, () => ({ toolName: "read" }));
+	const hint = shouldNudge(events, 0, true, 5);
+	assert.ok(hint !== null);
+	assert.match(hint, /15 tool calls/);
+});
+
+test("shouldNudge: long run — below threshold → null", () => {
+	const events = Array.from({ length: 14 }, () => ({ toolName: "read" }));
+	assert.equal(shouldNudge(events, 0, true, 5), null);
+});
+
+test("shouldNudge: long run — above threshold does not re-fire", () => {
+	const events = Array.from({ length: 16 }, () => ({ toolName: "read" }));
+	assert.equal(shouldNudge(events, 0, true, 5), null);
+});
+
+test("shouldNudge: long run — respects custom threshold", () => {
+	const events = Array.from({ length: 8 }, () => ({ toolName: "bash" }));
+	const hint = shouldNudge(events, 0, true, 5, { longRunToolCalls: 8 });
+	assert.ok(hint !== null);
+	assert.match(hint, /8 tool calls/);
 });

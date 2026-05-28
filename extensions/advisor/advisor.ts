@@ -26,10 +26,10 @@ import {
 	type ExtensionContext,
 	type ToolInfo,
 } from "@earendil-works/pi-coding-agent";
-import { buildAdvisorMessages, isVerificationCommand, shouldNudge, type ExecutorSignals } from "./advisor-messages.js";
+import { buildAdvisorMessages, DEFAULT_NUDGE_CONFIG, isVerificationCommand, shouldNudge, type ExecutorSignals, type NudgeConfig } from "./advisor-messages.js";
 import type { SelectItem } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { showAdvisorPicker, showEffortPicker, showMappingsPicker } from "./advisor-ui.js";
+import { showAdvisorPicker, showEffortPicker, showMappingsPicker, showNudgePicker } from "./advisor-ui.js";
 
 // ---------------------------------------------------------------------------
 // Constants — grouped by concern, flat named consts (no namespaced objects)
@@ -48,6 +48,30 @@ const ADVISOR_CONFIG_PATH = join(homedir(), ".pi", "agent", "pi-advisor.json");
 const NO_ADVISOR_VALUE = "__no_advisor__";
 const OFF_VALUE = "__off__";
 const DEFAULT_EXECUTOR_VALUE = "__default__";
+const NUDGE_DEFAULT_VALUE = "__nudge_default__";
+
+// Nudge presets — named sensitivity levels surfaced in the /advisor command.
+type NudgePreset = "heavy" | "light" | "off";
+const NUDGE_PRESET_CONFIGS: Record<NudgePreset, NudgeConfig> = {
+	heavy: { mutationBurst: 2, longRunToolCalls: 8, backoffToolCalls: 10 },
+	light: { mutationBurst: 8, longRunToolCalls: 30, backoffToolCalls: 40 },
+	off: { disabled: true },
+};
+
+/** Map a stored NudgeConfig back to the nearest preset name, or "default" if unset/unrecognized. */
+function detectNudgePreset(nudge: NudgeConfig | undefined): NudgePreset | "default" {
+	if (!nudge) return "default";
+	if (nudge.disabled) return "off";
+	if ((nudge.mutationBurst ?? DEFAULT_NUDGE_CONFIG.mutationBurst) <= 3) return "heavy";
+	if ((nudge.mutationBurst ?? DEFAULT_NUDGE_CONFIG.mutationBurst) >= 6) return "light";
+	return "default";
+}
+
+/** Short label shown in the mappings overview for non-default nudge settings. */
+function nudgeSensitivityLabel(nudge: NudgeConfig | undefined): string | undefined {
+	const preset = detectNudgePreset(nudge);
+	return preset === "default" ? undefined : `nudge:${preset}`;
+}
 
 // Effort levels
 const BASE_EFFORT_LEVELS: ThinkingLevel[] = ["minimal", "low", "medium", "high"];
@@ -122,6 +146,8 @@ interface GuidanceFields {
 interface AdvisorEntry {
 	modelStub?: string;
 	effort?: ThinkingLevel;
+	/** Per-executor nudge thresholds. Merged over the global config.nudge and DEFAULT_NUDGE_CONFIG. */
+	nudge?: NudgeConfig;
 }
 
 interface AdvisorConfig {
@@ -134,6 +160,8 @@ interface AdvisorConfig {
 	maxUsesPerRun?: number;
 	/** Max transcript messages forwarded to advisor (default: 18). */
 	maxContextMessages?: number;
+	/** Automatic nudge trigger thresholds and backoff. */
+	nudge?: NudgeConfig;
 }
 
 export function loadAdvisorConfig(): AdvisorConfig {
@@ -201,26 +229,33 @@ export function saveAdvisorConfig(
 	stub: string | undefined,
 	effort: ThinkingLevel | undefined,
 	executorStub: string | undefined,
+	nudge?: NudgeConfig,
 ): void {
 	const existing = loadAdvisorConfig();
 	const config: AdvisorConfig = {
 		default: existing.default,
 		byExecutor: { ...(existing.byExecutor ?? {}) },
 		guidance: existing.guidance,
+		nudge: existing.nudge,
 	};
+
+	function buildEntry(modelStub: string): AdvisorEntry {
+		const entry: AdvisorEntry = { modelStub };
+		if (effort) entry.effort = effort;
+		if (nudge) entry.nudge = nudge;
+		return entry;
+	}
 
 	if (executorStub) {
 		if (stub) {
-			config.byExecutor![executorStub] = effort ? { modelStub: stub, effort } : { modelStub: stub };
-			if (!config.default?.modelStub) {
-				config.default = effort ? { modelStub: stub, effort } : { modelStub: stub };
-			}
+			config.byExecutor![executorStub] = buildEntry(stub);
+			if (!config.default?.modelStub) config.default = buildEntry(stub);
 		} else {
 			delete config.byExecutor![executorStub];
 		}
 	} else {
 		if (stub) {
-			config.default = effort ? { modelStub: stub, effort } : { modelStub: stub };
+			config.default = buildEntry(stub);
 		} else {
 			delete config.default;
 		}
@@ -229,6 +264,7 @@ export function saveAdvisorConfig(
 	if (config.byExecutor && Object.keys(config.byExecutor).length === 0) delete config.byExecutor;
 	if (!config.default) delete config.default;
 	if (!config.guidance) delete config.guidance;
+	if (!config.nudge) delete config.nudge;
 
 	writeAdvisorConfig(config);
 }
@@ -269,6 +305,16 @@ interface AdvisorState {
 	inventoryMessage?: Message;
 	/** Executor key the current advisor was last resolved for. Survives module re-import on /new, /fork, /resume. */
 	activeExecutorKey?: string;
+	/**
+	 * Running count of non-advisor tool calls this session. Incremented in
+	 * tool_execution_end; cleared at session_start. Used for nudge backoff.
+	 */
+	sessionToolCallCount?: number;
+	/**
+	 * sessionToolCallCount value when the last nudge was delivered.
+	 * undefined = no nudge has fired yet this session. Used to enforce backoff.
+	 */
+	sessionLastNudgeAtCount?: number;
 }
 
 function getAdvisorRuntimeState(): AdvisorState {
@@ -399,6 +445,42 @@ export function getNudgedThisRun(): boolean { return nudgedThisRun; }
 export function setNudgedThisRun(value: boolean): void { nudgedThisRun = value; }
 export function resetRunState(): void { runToolEvents = []; usesThisRun = 0; nudgedThisRun = false; }
 export function pushRunToolEvent(event: RunToolEvent): void { runToolEvents.push(event); }
+
+// Session-level nudge state — stored in globalThis, only cleared at session_start.
+export function getSessionToolCallCount(): number { return getAdvisorRuntimeState().sessionToolCallCount ?? 0; }
+export function incrementSessionToolCallCount(): void {
+	const state = getAdvisorRuntimeState();
+	state.sessionToolCallCount = (state.sessionToolCallCount ?? 0) + 1;
+}
+export function getSessionLastNudgeAtCount(): number | undefined { return getAdvisorRuntimeState().sessionLastNudgeAtCount; }
+export function setSessionLastNudgeAtCount(count: number): void { getAdvisorRuntimeState().sessionLastNudgeAtCount = count; }
+export function resetSessionNudgeState(): void {
+	const state = getAdvisorRuntimeState();
+	state.sessionToolCallCount = 0;
+	state.sessionLastNudgeAtCount = undefined;
+}
+
+export function getActiveExecutorKey(): string | undefined {
+	return getAdvisorRuntimeState().activeExecutorKey;
+}
+
+/**
+ * Resolve nudge config for the current executor.
+ *
+ * Resolution order (later layers win):
+ *   DEFAULT_NUDGE_CONFIG → config.nudge (global) → resolvedEntry.nudge (per-executor)
+ *
+ * This mirrors the byExecutor → default fallback that resolveAdvisorEntry uses,
+ * so per-executor nudge settings are always more specific than the global default.
+ */
+export function resolveNudgeConfig(config: AdvisorConfig, executorStub?: string): Required<NudgeConfig> {
+	const entry = resolveAdvisorEntry(config, executorStub);
+	return {
+		...DEFAULT_NUDGE_CONFIG,
+		...(config.nudge ?? {}),
+		...(entry?.nudge ?? {}),
+	};
+}
 
 
 
@@ -839,14 +921,15 @@ export function registerAdvisorCommand(pi: ExtensionAPI): void {
 			const executorStubActive = modelStubOf(ctx.model);
 
 			// Helper: human-readable label for an advisor entry.
-			function advisorLabel(entry: { modelStub?: string; effort?: ThinkingLevel } | undefined): string {
+			function advisorLabel(entry: AdvisorEntry | undefined): string {
 				if (!entry?.modelStub) return "—";
 				const parsed = parseModelStub(entry.modelStub);
 				const model = parsed
 					? availableModels.find((m) => m.provider === parsed.provider && m.id === parsed.modelId)
 					: undefined;
 				const name = model?.name ?? entry.modelStub;
-				return `${name}${entry.effort ? ` / ${entry.effort}` : ""}`;
+				const nudgeHint = nudgeSensitivityLabel(entry.nudge);
+				return `${name}${entry.effort ? ` / ${entry.effort}` : ""}${nudgeHint ? `  [${nudgeHint}]` : ""}`;
 			}
 
 			// --- Step 1: Mappings overview ---
@@ -936,8 +1019,26 @@ export function registerAdvisorCommand(pi: ExtensionAPI): void {
 				effortChoice = effortResult === OFF_VALUE ? undefined : (effortResult as ThinkingLevel);
 			}
 
+			// --- Step 4: Nudge sensitivity picker ---
+			const currentNudgePreset = detectNudgePreset(currentEntry?.nudge);
+			const nudgeItems = [
+				{ value: "heavy", label: `heavy  (nudge early and often)${currentNudgePreset === "heavy" ? CHECKMARK : ""}` },
+				{ value: NUDGE_DEFAULT_VALUE, label: `default  (balanced)${currentNudgePreset === "default" ? CHECKMARK : ""}` },
+				{ value: "light", label: `light  (nudge infrequently)${currentNudgePreset === "light" ? CHECKMARK : ""}` },
+				{ value: "off", label: `off  (no automatic nudges)${currentNudgePreset === "off" ? CHECKMARK : ""}` },
+			];
+			const nudgePresetOrder = ["heavy", NUDGE_DEFAULT_VALUE, "light", "off"];
+			const nudgeInitialIdx = nudgePresetOrder.indexOf(currentNudgePreset === "default" ? NUDGE_DEFAULT_VALUE : currentNudgePreset);
+
+			const nudgeResult = await showNudgePicker(ctx, nudgeItems, nudgeInitialIdx >= 0 ? nudgeInitialIdx : 1);
+			if (!nudgeResult) return;
+
+			const nudgeConfig = nudgeResult === NUDGE_DEFAULT_VALUE
+				? undefined
+				: NUDGE_PRESET_CONFIGS[nudgeResult as NudgePreset];
+
 			const pickedStub = `${picked.provider}:${picked.id}`;
-			saveAdvisorConfig(pickedStub, effortChoice, executorStub);
+			saveAdvisorConfig(pickedStub, effortChoice, executorStub, nudgeConfig);
 
 			if (executorIsActive) {
 				setAdvisorModel(picked);

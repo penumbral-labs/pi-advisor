@@ -39,6 +39,12 @@ const EFFORT_HEADER_PROSE =
 	"Choose the reasoning effort level for the advisor. " +
 	"Higher levels produce stronger judgment but use more tokens.";
 
+const NUDGE_HEADER_TITLE = "Nudge Sensitivity";
+const NUDGE_HEADER_PROSE =
+	"How aggressively the advisor nudge fires for this executor. " +
+	"Smaller or less reliable models benefit from heavier nudging; " +
+	"stronger models can be left to self-direct.";
+
 // ---------------------------------------------------------------------------
 // Shared theme helper
 // ---------------------------------------------------------------------------
@@ -175,6 +181,32 @@ export async function showAdvisorPicker(ctx: ExtensionContext, items: SelectItem
 			[ADVISOR_HEADER_PROSE_1, ADVISOR_HEADER_PROSE_2],
 			items,
 			undefined,
+			(value) => done(value),
+			() => done(null),
+		);
+		return {
+			render: (w) => container.render(w),
+			invalidate: () => container.invalidate(),
+			handleInput: (data) => {
+				handleInput(data);
+				_tui.requestRender();
+			},
+		};
+	});
+}
+
+export async function showNudgePicker(
+	ctx: ExtensionContext,
+	items: SelectItem[],
+	initialIndex?: number,
+): Promise<string | null> {
+	return ctx.ui.custom<string | null>((_tui, theme, _kb, done) => {
+		const { container, handleInput } = buildSelectPanel(
+			theme,
+			NUDGE_HEADER_TITLE,
+			[NUDGE_HEADER_PROSE],
+			items,
+			initialIndex,
 			(value) => done(value),
 			() => done(null),
 		);

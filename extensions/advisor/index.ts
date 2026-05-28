@@ -16,10 +16,14 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
 	ADVISOR_TOOL_NAME,
 	applyAdvisorForExecutor,
+	getActiveExecutorKey,
 	getAdvisorModel,
 	getNudgedThisRun,
 	getRunToolEvents,
+	getSessionLastNudgeAtCount,
+	getSessionToolCallCount,
 	getUsesThisRun,
+	incrementSessionToolCallCount,
 	loadAdvisorConfig,
 	MAX_USES_PER_RUN_DEFAULT,
 	pushRunToolEvent,
@@ -27,7 +31,10 @@ import {
 	registerAdvisorCommand,
 	registerAdvisorTool,
 	resetRunState,
+	resetSessionNudgeState,
+	resolveNudgeConfig,
 	setNudgedThisRun,
+	setSessionLastNudgeAtCount,
 	summarizeToolExecution,
 } from "./advisor.js";
 import { shouldNudge } from "./advisor-messages.js";
@@ -54,16 +61,31 @@ export default function (pi: ExtensionAPI) {
 		const args = toolArgsById.get(event.toolCallId);
 		toolArgsById.delete(event.toolCallId);
 		pushRunToolEvent(summarizeToolExecution(event.toolName, args, event.result, event.isError));
+		incrementSessionToolCallCount();
+
+		// Backoff: don't nudge if a nudge was delivered within the last N tool calls.
+		// Using session-level counts so agent_start resets (from followUp micro-turns)
+		// don't bypass the cooldown.
 		const config = loadAdvisorConfig();
+		const nudgeCfg = resolveNudgeConfig(config, getActiveExecutorKey());
+		const sessionCount = getSessionToolCallCount();
+		const lastNudgeAt = getSessionLastNudgeAtCount();
+		const backoffClear = lastNudgeAt === undefined || sessionCount - lastNudgeAt >= nudgeCfg.backoffToolCalls;
+
+		if (!backoffClear) {
+			if (getNudgedThisRun()) ctx.ui.setStatus("advisor-nudge", undefined);
+			return;
+		}
+
 		const maxUsesPerRun = config.maxUsesPerRun ?? MAX_USES_PER_RUN_DEFAULT;
-		const hint = shouldNudge(getRunToolEvents(), getUsesThisRun(), getAdvisorModel() !== undefined, maxUsesPerRun);
-		// Inject the nudge into the agent's context once per run so the model
-		// actually sees it. Delivered as `followUp` so it lands at a natural
-		// pause rather than mid-tool-streak. The footer flashes a brief
-		// "advisor nudged" banner just on the firing event, then clears on the
-		// next tool tick — no sticky hint text.
+		const hint = shouldNudge(getRunToolEvents(), getUsesThisRun(), getAdvisorModel() !== undefined, maxUsesPerRun, nudgeCfg);
+		// Inject the nudge into the agent's context so the model sees it.
+		// Delivered as `followUp` so it lands at a natural pause rather than
+		// mid-tool-streak. The footer flashes a brief banner on the firing event
+		// then clears on the next tool tick.
 		if (hint && !getNudgedThisRun()) {
 			setNudgedThisRun(true);
+			setSessionLastNudgeAtCount(sessionCount);
 			pi.sendMessage(
 				{ customType: "advisor-nudge", content: hint, display: true },
 				{ deliverAs: "followUp" },
@@ -75,6 +97,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
+		resetSessionNudgeState();
 		applyAdvisorForExecutor(ctx.model, ctx, pi, "restore");
 	});
 
