@@ -67,6 +67,50 @@ Resolution order for the active executor:
 
 If nothing resolves, the advisor is disabled.
 
+## Automatic nudges
+
+Beyond on-demand `advisor()` calls, the extension injects a one-line "consider calling advisor"
+hint when tool activity crosses a threshold. Three triggers, in priority order:
+
+1. **Pre-execution** — the first `edit`/`write` after `preExecutionMinExploration` (default 3)
+   read/bash calls. This is the noisiest trigger: any read-then-write session fires it.
+2. **Mutation burst** — exactly the `mutationBurst`th (default 4) mutation.
+3. **Long run** — exactly the `longRunToolCalls`th (default 15) total tool call.
+
+`backoffToolCalls` (default 20) is the minimum session-level tool calls between nudges.
+
+Pick sensitivity per executor in `/advisor`, or hand-edit a `nudge` block. The presets:
+
+| Preset    | preExecution | mutationBurst | longRunToolCalls | backoffToolCalls |
+| --------- | ------------ | ------------- | ---------------- | ---------------- |
+| `heavy`   | on           | 2             | 8                | 10               |
+| `default` | on           | 4             | 15               | 20               |
+| `light`   | **off**      | 8             | 30               | 40               |
+| `off`     | — (`disabled: true`) | | | |
+
+`preExecution: false` keeps the burst/long-run safety nets but drops trigger 1 — the right shape
+for strong models that don't need pre-write hand-holding. `nudge` merges over the top-level `nudge`
+over `DEFAULT_NUDGE_CONFIG`, so any subset of keys is valid.
+
+`quietPaths` (top level) silences **all** automatic nudges when the session cwd falls under a listed
+directory — for home-base / non-coding trees like an Obsidian vault — regardless of executor. The
+`advisor()` tool stays callable on demand. Trailing `/**` or `/` is optional; a leading `~` expands
+to the home directory; matching is segment-aware (`~/work-os` matches `~/work-os/wiki`, not
+`~/work-os-2`).
+
+```json
+{
+  "quietPaths": ["~/work-os/**"],
+  "byExecutor": {
+    "anthropic:claude-opus-4-8": {
+      "modelStub": "llm-router:azure/gpt-5.5",
+      "effort": "xhigh",
+      "nudge": { "preExecution": false, "mutationBurst": 8, "longRunToolCalls": 30, "backoffToolCalls": 40 }
+    }
+  }
+}
+```
+
 ## Tool
 
 ```ts

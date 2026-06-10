@@ -37,7 +37,8 @@ import {
 	setSessionLastNudgeAtCount,
 	summarizeToolExecution,
 } from "./advisor.js";
-import { shouldNudge } from "./advisor-messages.js";
+import { cwdMatchesQuietPath, shouldNudge } from "./advisor-messages.js";
+import { homedir } from "node:os";
 
 export default function (pi: ExtensionAPI) {
 	registerAdvisorTool(pi);
@@ -67,6 +68,15 @@ export default function (pi: ExtensionAPI) {
 		// Using session-level counts so agent_start resets (from followUp micro-turns)
 		// don't bypass the cooldown.
 		const config = loadAdvisorConfig();
+
+		// Path-scoped quiet: silence automatic nudges in home-base / non-coding
+		// trees (e.g. an Obsidian vault) without dulling coding repos. The advisor
+		// tool stays callable on demand.
+		if (cwdMatchesQuietPath(ctx.cwd, config.quietPaths, homedir())) {
+			if (getNudgedThisRun()) ctx.ui.setStatus("advisor-nudge", undefined);
+			return;
+		}
+
 		const nudgeCfg = resolveNudgeConfig(config, getActiveExecutorKey());
 		const sessionCount = getSessionToolCallCount();
 		const lastNudgeAt = getSessionLastNudgeAtCount();

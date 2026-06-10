@@ -53,8 +53,8 @@ const NUDGE_DEFAULT_VALUE = "__nudge_default__";
 // Nudge presets — named sensitivity levels surfaced in the /advisor command.
 type NudgePreset = "heavy" | "light" | "off";
 const NUDGE_PRESET_CONFIGS: Record<NudgePreset, NudgeConfig> = {
-	heavy: { mutationBurst: 2, longRunToolCalls: 8, backoffToolCalls: 10 },
-	light: { mutationBurst: 8, longRunToolCalls: 30, backoffToolCalls: 40 },
+	heavy: { preExecution: true, mutationBurst: 2, longRunToolCalls: 8, backoffToolCalls: 10 },
+	light: { preExecution: false, mutationBurst: 8, longRunToolCalls: 30, backoffToolCalls: 40 },
 	off: { disabled: true },
 };
 
@@ -162,6 +162,13 @@ interface AdvisorConfig {
 	maxContextMessages?: number;
 	/** Automatic nudge trigger thresholds and backoff. */
 	nudge?: NudgeConfig;
+	/**
+	 * Directory prefixes where automatic nudges are silenced regardless of
+	 * executor (e.g. a home-base / non-coding vault). Trailing `/**` or `/` is
+	 * optional; a leading `~` expands to the home directory. The advisor tool
+	 * itself stays available for on-demand calls.
+	 */
+	quietPaths?: string[];
 }
 
 export function loadAdvisorConfig(): AdvisorConfig {
@@ -232,11 +239,13 @@ export function saveAdvisorConfig(
 	nudge?: NudgeConfig,
 ): void {
 	const existing = loadAdvisorConfig();
+	// Spread existing so top-level fields (quietPaths, maxUsesPerRun,
+	// maxContextMessages, guidance, nudge, ...) survive a /advisor save; only
+	// default/byExecutor are rewritten below. byExecutor is cloned so the
+	// mutations here don't touch the loaded object.
 	const config: AdvisorConfig = {
-		default: existing.default,
+		...existing,
 		byExecutor: { ...(existing.byExecutor ?? {}) },
-		guidance: existing.guidance,
-		nudge: existing.nudge,
 	};
 
 	function buildEntry(modelStub: string): AdvisorEntry {
