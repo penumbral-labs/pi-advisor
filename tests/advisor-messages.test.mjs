@@ -6,7 +6,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildAdvisorMessages, shouldNudge } from "../extensions/advisor/advisor-messages.ts";
+import { buildAdvisorMessages, cwdMatchesQuietPath, shouldNudge } from "../extensions/advisor/advisor-messages.ts";
 
 // ---------------------------------------------------------------------------
 // buildAdvisorMessages
@@ -272,4 +272,57 @@ test("shouldNudge: long run — respects custom threshold", () => {
 	const hint = shouldNudge(events, 0, true, 5, { longRunToolCalls: 8 });
 	assert.ok(hint !== null);
 	assert.match(hint, /8 tool calls/);
+});
+
+// ---------------------------------------------------------------------------
+// shouldNudge — preExecution toggle (light preset drops trigger 1)
+// ---------------------------------------------------------------------------
+
+test("shouldNudge: preExecution:false — first write after exploration does NOT fire trigger 1", () => {
+	const events = [
+		{ toolName: "read" }, { toolName: "bash" }, { toolName: "read" }, { toolName: "read" }, { toolName: "read" }, { toolName: "read" },
+		{ toolName: "edit" },
+	];
+	// Default config would fire here (6 explorations ≥ 3); preExecution:false suppresses it.
+	assert.equal(shouldNudge(events, 0, true, 5, { preExecution: false }), null);
+});
+
+test("shouldNudge: preExecution:false — burst/long-run nets still fire", () => {
+	const events = [
+		{ toolName: "edit" }, { toolName: "edit" }, { toolName: "edit" }, { toolName: "edit" },
+	];
+	const hint = shouldNudge(events, 0, true, 5, { preExecution: false });
+	assert.ok(hint !== null, "mutation burst should still fire with preExecution off");
+	assert.match(hint, /4 code changes/);
+});
+
+// ---------------------------------------------------------------------------
+// cwdMatchesQuietPath
+// ---------------------------------------------------------------------------
+
+const HOME = "/Users/aaron.small";
+
+test("cwdMatchesQuietPath: cwd under a ~/glob quiet path matches", () => {
+	assert.equal(cwdMatchesQuietPath("/Users/aaron.small/work-os/wiki", ["~/work-os/**"], HOME), true);
+});
+
+test("cwdMatchesQuietPath: exact directory match (no trailing glob)", () => {
+	assert.equal(cwdMatchesQuietPath("/Users/aaron.small/work-os", ["~/work-os"], HOME), true);
+});
+
+test("cwdMatchesQuietPath: trailing slash on cwd or pattern is ignored", () => {
+	assert.equal(cwdMatchesQuietPath("/Users/aaron.small/work-os/wiki/", ["~/work-os/"], HOME), true);
+});
+
+test("cwdMatchesQuietPath: sibling prefix does NOT match (segment-aware)", () => {
+	assert.equal(cwdMatchesQuietPath("/Users/aaron.small/work-os-2/repo", ["~/work-os/**"], HOME), false);
+});
+
+test("cwdMatchesQuietPath: unrelated cwd does not match", () => {
+	assert.equal(cwdMatchesQuietPath("/Users/aaron.small/src/janus", ["~/work-os/**"], HOME), false);
+});
+
+test("cwdMatchesQuietPath: empty/undefined quietPaths → false", () => {
+	assert.equal(cwdMatchesQuietPath("/Users/aaron.small/work-os", undefined, HOME), false);
+	assert.equal(cwdMatchesQuietPath("/Users/aaron.small/work-os", [], HOME), false);
 });

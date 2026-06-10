@@ -92,6 +92,8 @@ export function isVerificationCommand(command?: string): boolean {
 export interface NudgeConfig {
 	/** Disable all nudges for this executor. Useful for strong models that need less hand-holding. Default: false */
 	disabled?: boolean;
+	/** Enable the pre-execution trigger (first mutation after enough exploration). Set false to keep the burst/long-run nets but drop the noisy "you started writing" nudge. Default: true */
+	preExecution?: boolean;
 	/** Minimum exploration calls (read/bash) before first mutation to fire pre-execution nudge. Default: 3 */
 	preExecutionMinExploration?: number;
 	/** Mutation count at which the burst trigger fires. Default: 4 */
@@ -104,6 +106,7 @@ export interface NudgeConfig {
 
 export const DEFAULT_NUDGE_CONFIG = {
 	disabled: false,
+	preExecution: true,
 	preExecutionMinExploration: 3,
 	mutationBurst: 4,
 	longRunToolCalls: 15,
@@ -137,6 +140,7 @@ export function shouldNudge(
 	if (advisorCallsThisRun >= maxUsesPerRun) return null;
 	if (advisorCallsThisRun > 0) return null; // already consulted this run
 
+	const preExecutionEnabled = cfg.preExecution ?? DEFAULT_NUDGE_CONFIG.preExecution;
 	const preExploration = cfg.preExecutionMinExploration ?? DEFAULT_NUDGE_CONFIG.preExecutionMinExploration;
 	const burstThreshold = cfg.mutationBurst ?? DEFAULT_NUDGE_CONFIG.mutationBurst;
 	const longRunThreshold = cfg.longRunToolCalls ?? DEFAULT_NUDGE_CONFIG.longRunToolCalls;
@@ -145,7 +149,7 @@ export function shouldNudge(
 	const totalCalls = events.length;
 
 	// Trigger 1: Pre-execution — fires on the exact first mutation after enough exploration.
-	if (mutationCount === 1) {
+	if (preExecutionEnabled && mutationCount === 1) {
 		const firstMutationIdx = events.findIndex((e) => e.toolName === "edit" || e.toolName === "write");
 		const explorationBefore = events
 			.slice(0, firstMutationIdx)
@@ -166,6 +170,31 @@ export function shouldNudge(
 	}
 
 	return null;
+}
+
+/**
+ * True when `cwd` falls under any configured quiet path, where automatic
+ * nudges are silenced (e.g. a home-base / non-coding vault). Quiet paths are
+ * directory prefixes; a trailing `/**` or `/` is optional and ignored, and a
+ * leading `~` is expanded against `homeDir`. Matching is segment-aware, so
+ * `~/work-os` matches `~/work-os` and `~/work-os/wiki` but not `~/work-os-2`.
+ * Pure (no filesystem access) so it is unit-testable.
+ */
+export function cwdMatchesQuietPath(cwd: string, quietPaths: string[] | undefined, homeDir: string): boolean {
+	if (!quietPaths || quietPaths.length === 0) return false;
+	const expandHome = (p: string): string => {
+		if (p === "~") return homeDir;
+		if (p.startsWith("~/")) return `${homeDir}/${p.slice(2)}`;
+		return p;
+	};
+	const stripTrailing = (p: string): string => p.replace(/\/+\*\*$/, "").replace(/\/+$/, "");
+	const target = stripTrailing(cwd.trim());
+	for (const raw of quietPaths) {
+		const base = stripTrailing(expandHome(raw.trim()));
+		if (!base) continue;
+		if (target === base || target.startsWith(`${base}/`)) return true;
+	}
+	return false;
 }
 
 function buildSignalsBlock(signals: ExecutorSignals): string {
