@@ -239,11 +239,13 @@ export function saveAdvisorConfig(
 	nudge?: NudgeConfig,
 ): void {
 	const existing = loadAdvisorConfig();
+	// Spread existing so top-level fields (quietPaths, maxUsesPerRun,
+	// maxContextMessages, guidance, nudge, ...) survive a /advisor save; only
+	// default/byExecutor are rewritten below. byExecutor is cloned so the
+	// mutations here don't touch the loaded object.
 	const config: AdvisorConfig = {
-		default: existing.default,
+		...existing,
 		byExecutor: { ...(existing.byExecutor ?? {}) },
-		guidance: existing.guidance,
-		nudge: existing.nudge,
 	};
 
 	function buildEntry(modelStub: string): AdvisorEntry {
