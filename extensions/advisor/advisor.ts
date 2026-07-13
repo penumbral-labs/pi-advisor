@@ -30,6 +30,7 @@ import { buildAdvisorMessages, DEFAULT_NUDGE_CONFIG, isVerificationCommand, shou
 import type { SelectItem } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { showAdvisorPicker, showEffortPicker, showMappingsPicker, showNudgePicker } from "./advisor-ui.js";
+import { normalizeLiteLLMAdaptiveThinkingPayload } from "./adaptive-thinking.js";
 
 // ---------------------------------------------------------------------------
 // Constants — grouped by concern, flat named consts (no namespaced objects)
@@ -776,7 +777,13 @@ async function executeAdvisor(
 			// `tools: []` reaffirms the "never calls tools" contract even when
 			// `messages` contains prior toolCall/toolResult blocks (btw.ts:235).
 			{ systemPrompt: ADVISOR_SYSTEM_PROMPT, messages, tools: [] },
-			{ apiKey: auth.apiKey, headers: auth.headers, signal, reasoning: effort },
+			{
+				apiKey: auth.apiKey,
+				headers: auth.headers,
+				signal,
+				reasoning: effort,
+				onPayload: normalizeLiteLLMAdaptiveThinkingPayload,
+			},
 		);
 
 		if (response.stopReason === "aborted") {
