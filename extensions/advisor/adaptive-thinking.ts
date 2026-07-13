@@ -1,4 +1,4 @@
-import type { Api, Model } from "@earendil-works/pi-ai";
+import type { Api, AssistantMessage, Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
 
 // Cortex LiteLLM <1.89 translates reasoning_effort to legacy thinking.type=enabled,
 // which Opus 4.8 and Sonnet 5 reject. Advisor calls completeSimple() directly and
@@ -24,4 +24,22 @@ export function normalizeLiteLLMAdaptiveThinkingPayload(payload: unknown, model:
 	normalized.thinking = { type: "adaptive" };
 	normalized.output_config = { ...outputConfig, effort };
 	return normalized;
+}
+
+type CompleteSimple = (
+	model: Model<Api>,
+	context: Context,
+	options?: SimpleStreamOptions,
+) => Promise<AssistantMessage>;
+
+export function completeAdvisor(
+	model: Model<Api>,
+	context: Context,
+	options: SimpleStreamOptions,
+	complete: CompleteSimple,
+): Promise<AssistantMessage> {
+	return complete(model, context, {
+		...options,
+		onPayload: normalizeLiteLLMAdaptiveThinkingPayload,
+	});
 }

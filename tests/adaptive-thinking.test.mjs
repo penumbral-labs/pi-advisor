@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { normalizeLiteLLMAdaptiveThinkingPayload } from "../extensions/advisor/adaptive-thinking.ts";
+import {
+	completeAdvisor,
+	normalizeLiteLLMAdaptiveThinkingPayload,
+} from "../extensions/advisor/adaptive-thinking.ts";
 
 function model(id, provider = "litellm") {
 	return { id, provider };
@@ -62,4 +65,30 @@ test("leaves requests without reasoning effort unchanged", () => {
 		normalizeLiteLLMAdaptiveThinkingPayload({ messages: [] }, model("claude-opus-4-8")),
 		undefined,
 	);
+});
+
+test("advisor completion installs and applies the adaptive payload callback", async () => {
+	const advisorModel = model("claude-opus-4-8");
+	const context = { systemPrompt: "Advise.", messages: [], tools: [] };
+	let sentPayload;
+	const complete = async (receivedModel, receivedContext, options) => {
+		assert.equal(receivedModel, advisorModel);
+		assert.equal(receivedContext, context);
+		assert.equal(options.reasoning, "high");
+		assert.equal(typeof options.onPayload, "function");
+		sentPayload = await options.onPayload(
+			{ model: advisorModel.id, reasoning_effort: options.reasoning, messages: [] },
+			receivedModel,
+		);
+		return { stopReason: "stop", content: [] };
+	};
+
+	await completeAdvisor(advisorModel, context, { reasoning: "high" }, complete);
+
+	assert.deepEqual(sentPayload, {
+		model: "claude-opus-4-8",
+		messages: [],
+		thinking: { type: "adaptive" },
+		output_config: { effort: "high" },
+	});
 });
