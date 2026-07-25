@@ -155,18 +155,18 @@ export function shouldNudge(
 			.slice(0, firstMutationIdx)
 			.filter((e) => e.toolName === "read" || e.toolName === "bash").length;
 		if (explorationBefore >= preExploration) {
-			return `You've started writing after ${explorationBefore} exploratory tool calls. Call \`advisor({stage: 'initial'})\` to validate your approach before going further.`;
+			return `You've started writing after ${explorationBefore} exploratory tool calls. If independent judgment could materially change the approach, consider \`advisor({stage: 'initial'})\` before going further.`;
 		}
 	}
 
 	// Trigger 2: Mutation burst — fires exactly at the threshold count.
 	if (mutationCount === burstThreshold) {
-		return `You've made ${mutationCount} code changes without advisor guidance. Call \`advisor()\` to check your approach.`;
+		return `You've made ${mutationCount} code changes. If independent judgment could materially change the approach, consider \`advisor()\`.`;
 	}
 
 	// Trigger 3: Long run — fires exactly at the threshold count.
 	if (totalCalls === longRunThreshold) {
-		return `${totalCalls} tool calls without advisor guidance. Call \`advisor()\` to check your approach.`;
+		return `${totalCalls} tool calls into this run. If independent judgment could materially change the approach, consider \`advisor()\`.`;
 	}
 
 	return null;

@@ -36,8 +36,9 @@ ignored. Run `/advisor` once after install to set up your pairings.
 - "No advisor" disables the advisor for the current executor only.
 
 The `advisor` tool is registered at load but excluded from active tools whenever no advisor is
-selected for the current executor. It takes zero parameters — calling it forwards the full
-serialized conversation branch to the resolved advisor model.
+selected for the current executor. Calling it forwards the curated conversation branch to the
+resolved advisor model. Use it selectively when independent judgment could materially change the
+approach, not as a mandatory beginning-or-end lifecycle check.
 
 ## Config schema
 
@@ -114,7 +115,8 @@ to the home directory; matching is segment-aware (`~/work-os` matches `~/work-os
 ## Tool
 
 ```ts
-advisor() // zero parameters
+advisor()                       // stage inferred from recent activity
+advisor({ stage: "recovery" }) // explicit initial, recovery, or final-check stage
 ```
 
 Returns:
