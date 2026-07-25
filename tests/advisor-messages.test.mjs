@@ -184,6 +184,7 @@ test("shouldNudge: pre-execution — first write after enough exploration → hi
 	];
 	const hint = shouldNudge(events, 0, true, 5);
 	assert.ok(hint !== null, "expected a hint");
+	assert.match(hint, /If independent judgment could materially change the approach/);
 	assert.match(hint, /advisor\(\{stage: 'initial'\}\)/);
 });
 
@@ -223,6 +224,7 @@ test("shouldNudge: mutation burst — fires exactly at threshold", () => {
 	const hint = shouldNudge(events, 0, true, 5);
 	assert.ok(hint !== null);
 	assert.match(hint, /4 code changes/);
+	assert.match(hint, /consider `advisor\(\)`/);
 });
 
 test("shouldNudge: mutation burst — below threshold → null", () => {
@@ -255,6 +257,7 @@ test("shouldNudge: long run — fires exactly at threshold", () => {
 	const hint = shouldNudge(events, 0, true, 5);
 	assert.ok(hint !== null);
 	assert.match(hint, /15 tool calls/);
+	assert.match(hint, /consider `advisor\(\)`/);
 });
 
 test("shouldNudge: long run — below threshold → null", () => {
