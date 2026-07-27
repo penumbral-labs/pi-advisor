@@ -248,7 +248,7 @@ function detectStage(events: RunToolEvent[], advisorCallsThisRun: number): { sta
 	return { stage: "initial", reason: "The executor is still in the early orientation phase." };
 }
 
-async function executeAdvisor(
+export async function executeAdvisor(
 	ctx: ExtensionContext,
 	pi: ExtensionAPI,
 	signal: AbortSignal | undefined,

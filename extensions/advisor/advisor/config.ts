@@ -12,6 +12,14 @@ import type { ThinkingLevel } from "@earendil-works/pi-ai";
 import type { NudgeConfig } from "../advisor-messages.js";
 
 export const ADVISOR_CONFIG_PATH = join(homedir(), ".pi", "agent", "pi-advisor.json");
+let advisorConfigPath = ADVISOR_CONFIG_PATH;
+
+/** @internal Override the config file for isolated tests; returns a restore function. */
+export function __setAdvisorConfigPathForTests(path: string): () => void {
+	const previousPath = advisorConfigPath;
+	advisorConfigPath = path;
+	return () => { advisorConfigPath = previousPath; };
+}
 
 export interface GuidanceFields {
 	promptSnippet?: string;
@@ -53,7 +61,7 @@ export function loadJsonConfig<T extends object = AdvisorConfig>(path: string): 
 }
 
 export function loadAdvisorConfig(): AdvisorConfig {
-	return loadJsonConfig<AdvisorConfig>(ADVISOR_CONFIG_PATH);
+	return loadJsonConfig<AdvisorConfig>(advisorConfigPath);
 }
 
 /** Persist formatted JSON. The default umask controls permissions. */
@@ -68,7 +76,7 @@ export function saveJsonConfig(path: string, config: object): boolean {
 }
 
 export function writeAdvisorConfig(config: AdvisorConfig): boolean {
-	return saveJsonConfig(ADVISOR_CONFIG_PATH, config);
+	return saveJsonConfig(advisorConfigPath, config);
 }
 
 /** Resolve a specific executor mapping first, then fall back to the default. */

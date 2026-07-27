@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import test, { afterEach } from "node:test";
-import { dirname } from "node:path";
-import { ADVISOR_CONFIG_PATH } from "../extensions/advisor/advisor/config.ts";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import test, { after, afterEach } from "node:test";
+import { ADVISOR_CONFIG_PATH, __setAdvisorConfigPathForTests } from "../extensions/advisor/advisor/config.ts";
 import { registerAdvisorBeforeAgentStart, registerModelSelectHandler } from "../extensions/advisor/advisor/handlers.ts";
 import { applyAdvisorForExecutor } from "../extensions/advisor/advisor/restore.ts";
 import { getAdvisorEffort, getAdvisorModel, setActiveExecutorKey, setAdvisorEffort, setAdvisorModel } from "../extensions/advisor/advisor/state.ts";
@@ -11,10 +12,15 @@ const executorA = { provider: "openai", id: "gpt-5", name: "GPT 5" };
 const executorB = { provider: "google", id: "gemini", name: "Gemini" };
 const advisorA = { provider: "anthropic", id: "opus", name: "Opus" };
 const advisorB = { provider: "anthropic", id: "sonnet", name: "Sonnet" };
+const testDirectory = mkdtempSync(join(tmpdir(), "pi-advisor-lifecycle-"));
+const testConfigPath = join(testDirectory, "pi-advisor.json");
+const productionConfigExisted = existsSync(ADVISOR_CONFIG_PATH);
+const productionConfigBefore = productionConfigExisted ? readFileSync(ADVISOR_CONFIG_PATH) : undefined;
+const restoreConfigPath = __setAdvisorConfigPathForTests(testConfigPath);
 
 function writeConfig(config) {
-	mkdirSync(dirname(ADVISOR_CONFIG_PATH), { recursive: true });
-	writeFileSync(ADVISOR_CONFIG_PATH, JSON.stringify(config), "utf8");
+	mkdirSync(dirname(testConfigPath), { recursive: true });
+	writeFileSync(testConfigPath, JSON.stringify(config), "utf8");
 }
 function harness(models = [advisorA, advisorB]) {
 	let activeTools = ["other"];
@@ -34,8 +40,15 @@ function harness(models = [advisorA, advisorB]) {
 }
 
 afterEach(() => {
-	rmSync(ADVISOR_CONFIG_PATH, { force: true, recursive: true });
+	rmSync(testConfigPath, { force: true });
 	setAdvisorModel(undefined); setAdvisorEffort(undefined); setActiveExecutorKey(undefined);
+});
+
+after(() => {
+	restoreConfigPath();
+	rmSync(testDirectory, { recursive: true, force: true });
+	assert.equal(existsSync(ADVISOR_CONFIG_PATH), productionConfigExisted);
+	if (productionConfigBefore) assert.deepEqual(readFileSync(ADVISOR_CONFIG_PATH), productionConfigBefore);
 });
 
 test("restore resolves a specific executor before default and activates the tool", () => {
@@ -92,5 +105,5 @@ test("lifecycle never rewrites the persisted colon-keyed mapping", () => {
 	const fixture = { byExecutor: { "openai:gpt-5": { modelStub: "anthropic:opus" } }, future: true };
 	writeConfig(fixture);
 	const h = harness(); applyAdvisorForExecutor(executorA, h.ctx, h.pi, "restore");
-	assert.deepEqual(JSON.parse(readFileSync(ADVISOR_CONFIG_PATH, "utf8")), fixture);
+	assert.deepEqual(JSON.parse(readFileSync(testConfigPath, "utf8")), fixture);
 });
