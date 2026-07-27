@@ -13,9 +13,7 @@
  * via pi.setActiveTools(). Selection is in-memory and resets each session.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { Api, Model, StopReason, Usage } from "@earendil-works/pi-ai";
 import { completeSimple, getSupportedThinkingLevels, type Message, type ThinkingLevel } from "@earendil-works/pi-ai";
@@ -32,8 +30,18 @@ import { Type } from "typebox";
 import { showAdvisorPicker, showEffortPicker, showMappingsPicker, showNudgePicker } from "./advisor-ui.js";
 import { completeAdvisor } from "./adaptive-thinking.js";
 import { DEFAULT_PROMPT_GUIDELINES, DEFAULT_PROMPT_SNIPPET } from "./guidance.js";
+import {
+	loadAdvisorConfig,
+	modelStubOf,
+	parseModelStub,
+	resolveAdvisorEntry,
+	saveAdvisorConfig,
+	validateGuidanceFields,
+	type AdvisorConfig,
+} from "./advisor/config.js";
 
 export { DEFAULT_PROMPT_GUIDELINES, DEFAULT_PROMPT_SNIPPET } from "./guidance.js";
+export { loadAdvisorConfig, modelStubOf, resolveAdvisorEntry, saveAdvisorConfig } from "./advisor/config.js";
 
 // ---------------------------------------------------------------------------
 // Constants — grouped by concern, flat named consts (no namespaced objects)
@@ -42,11 +50,6 @@ export { DEFAULT_PROMPT_GUIDELINES, DEFAULT_PROMPT_SNIPPET } from "./guidance.js
 // Tool identity
 export const ADVISOR_TOOL_NAME = "advisor";
 const TOOL_LABEL = "Advisor";
-
-// Persistence — colocates with other pi-plugin config under ~/.pi/agent/.
-// File contains only model identifiers and effort strings (no credentials),
-// so it uses default 0644 perms like the rest of ~/.pi/agent/.
-const ADVISOR_CONFIG_PATH = join(homedir(), ".pi", "agent", "pi-advisor.json");
 
 // Selector sentinels — double-underscore form is collision-proof against real provider:id keys
 const NO_ADVISOR_VALUE = "__no_advisor__";
@@ -88,6 +91,7 @@ const CHECKMARK = " ✓";
 
 // Messages (static)
 const MSG_ADVISOR_DISABLED = "Advisor disabled";
+const MSG_CONFIG_SAVE_FAILED = "Advisor config could not be saved; selection was not changed.";
 const MSG_NO_ADVISOR_FOR_EXECUTOR = "No advisor configured for this executor; advisor disabled.";
 const MSG_REQUIRES_INTERACTIVE = "/advisor requires interactive mode";
 const MSG_ADVISOR_NUDGE = "Please advise on the executor's situation above.";
@@ -136,161 +140,6 @@ export interface RunToolEvent {
 	command?: string;
 	isError: boolean;
 	timestamp: number;
-}
-
-// ---------------------------------------------------------------------------
-// Config file persistence (cross-session)
-// ---------------------------------------------------------------------------
-
-interface GuidanceFields {
-	promptSnippet?: string;
-	promptGuidelines?: string[];
-}
-
-interface AdvisorEntry {
-	modelStub?: string;
-	effort?: ThinkingLevel;
-	/** Per-executor nudge thresholds. Merged over the global config.nudge and DEFAULT_NUDGE_CONFIG. */
-	nudge?: NudgeConfig;
-}
-
-interface AdvisorConfig {
-	/** Default advisor when no per-executor entry matches. */
-	default?: AdvisorEntry;
-	/** Per-executor advisor mapping, indexed by `<provider>:<modelId>` stub. */
-	byExecutor?: Record<string, AdvisorEntry>;
-	guidance?: GuidanceFields;
-	/** Max advisor calls per agent run (default: 5). */
-	maxUsesPerRun?: number;
-	/** Max transcript messages forwarded to advisor (default: 18). */
-	maxContextMessages?: number;
-	/** Automatic nudge trigger thresholds and backoff. */
-	nudge?: NudgeConfig;
-	/**
-	 * Directory prefixes where automatic nudges are silenced regardless of
-	 * executor (e.g. a home-base / non-coding vault). Trailing `/**` or `/` is
-	 * optional; a leading `~` expands to the home directory. The advisor tool
-	 * itself stays available for on-demand calls.
-	 */
-	quietPaths?: string[];
-}
-
-export function loadAdvisorConfig(): AdvisorConfig {
-	if (!existsSync(ADVISOR_CONFIG_PATH)) return {};
-	try {
-		return JSON.parse(readFileSync(ADVISOR_CONFIG_PATH, "utf-8")) as AdvisorConfig;
-	} catch {
-		return {};
-	}
-}
-
-/**
- * Resolve the advisor entry to use for a given executor stub.
- * `byExecutor[executorStub]` first, falling back to `default`. Returns
- * undefined when nothing resolves — caller treats that as "advisor off".
- */
-export function resolveAdvisorEntry(
-	config: AdvisorConfig,
-	executorStub: string | undefined,
-): AdvisorEntry | undefined {
-	if (executorStub) {
-		const per = config.byExecutor?.[executorStub];
-		if (per?.modelStub) return per;
-	}
-	if (config.default?.modelStub) return config.default;
-	return undefined;
-}
-
-function validateGuidanceFields(fields: unknown): GuidanceFields {
-	if (!fields || typeof fields !== "object") return {};
-	const g = fields as Record<string, unknown>;
-	const result: GuidanceFields = {};
-	if (typeof g.promptSnippet === "string" && g.promptSnippet.length > 0) {
-		result.promptSnippet = g.promptSnippet;
-	}
-	if (
-		Array.isArray(g.promptGuidelines) &&
-		g.promptGuidelines.length > 0 &&
-		g.promptGuidelines.every((s) => typeof s === "string" && s.length > 0)
-	) {
-		result.promptGuidelines = g.promptGuidelines;
-	}
-	return result;
-}
-
-function writeAdvisorConfig(config: AdvisorConfig): void {
-	try {
-		mkdirSync(dirname(ADVISOR_CONFIG_PATH), { recursive: true });
-		writeFileSync(ADVISOR_CONFIG_PATH, `${JSON.stringify(config, null, 2)}\n`, "utf-8");
-	} catch {
-		// write may fail on disk-full or permission errors — best effort only
-	}
-}
-
-/**
- * Persist an advisor selection.
- *
- * - When executorStub is provided: writes under `byExecutor[executorStub]`
- *   and ALSO seeds `default` if no default exists yet (so first-time setup
- *   produces sane behavior across all executors until the user configures
- *   more). When stub is undefined, the executor entry is removed.
- * - When executorStub is undefined: writes (or clears) the global `default`.
- */
-export function saveAdvisorConfig(
-	stub: string | undefined,
-	effort: ThinkingLevel | undefined,
-	executorStub: string | undefined,
-	nudge?: NudgeConfig,
-): void {
-	const existing = loadAdvisorConfig();
-	// Spread existing so top-level fields (quietPaths, maxUsesPerRun,
-	// maxContextMessages, guidance, nudge, ...) survive a /advisor save; only
-	// default/byExecutor are rewritten below. byExecutor is cloned so the
-	// mutations here don't touch the loaded object.
-	const config: AdvisorConfig = {
-		...existing,
-		byExecutor: { ...(existing.byExecutor ?? {}) },
-	};
-
-	function buildEntry(modelStub: string): AdvisorEntry {
-		const entry: AdvisorEntry = { modelStub };
-		if (effort) entry.effort = effort;
-		if (nudge) entry.nudge = nudge;
-		return entry;
-	}
-
-	if (executorStub) {
-		if (stub) {
-			config.byExecutor![executorStub] = buildEntry(stub);
-			if (!config.default?.modelStub) config.default = buildEntry(stub);
-		} else {
-			delete config.byExecutor![executorStub];
-		}
-	} else {
-		if (stub) {
-			config.default = buildEntry(stub);
-		} else {
-			delete config.default;
-		}
-	}
-
-	if (config.byExecutor && Object.keys(config.byExecutor).length === 0) delete config.byExecutor;
-	if (!config.default) delete config.default;
-	if (!config.guidance) delete config.guidance;
-	if (!config.nudge) delete config.nudge;
-
-	writeAdvisorConfig(config);
-}
-
-function parseModelStub(stub: string): { provider: string; modelId: string } | undefined {
-	const idx = stub.indexOf(":");
-	if (idx < 1) return undefined;
-	return { provider: stub.slice(0, idx), modelId: stub.slice(idx + 1) };
-}
-
-export function modelStubOf(model: { provider: string; id: string } | undefined): string | undefined {
-	if (!model) return undefined;
-	return `${model.provider}:${model.id}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -986,7 +835,10 @@ export function registerAdvisorCommand(pi: ExtensionAPI): void {
 			if (!choice) return;
 
 			if (choice === NO_ADVISOR_VALUE) {
-				saveAdvisorConfig(undefined, undefined, executorStub);
+				if (!saveAdvisorConfig(undefined, undefined, executorStub)) {
+					ctx.ui.notify(MSG_CONFIG_SAVE_FAILED, "error");
+					return;
+				}
 				if (executorIsActive) {
 					setAdvisorModel(undefined);
 					setAdvisorEffort(undefined);
@@ -1044,7 +896,10 @@ export function registerAdvisorCommand(pi: ExtensionAPI): void {
 				: NUDGE_PRESET_CONFIGS[nudgeResult as NudgePreset];
 
 			const pickedStub = `${picked.provider}:${picked.id}`;
-			saveAdvisorConfig(pickedStub, effortChoice, executorStub, nudgeConfig);
+			if (!saveAdvisorConfig(pickedStub, effortChoice, executorStub, nudgeConfig)) {
+				ctx.ui.notify(MSG_CONFIG_SAVE_FAILED, "error");
+				return;
+			}
 
 			if (executorIsActive) {
 				setAdvisorModel(picked);
