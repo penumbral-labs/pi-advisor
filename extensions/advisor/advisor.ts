@@ -13,127 +13,60 @@
  * via pi.setActiveTools(). Selection is in-memory and resets each session.
  */
 
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import type { Api, Model, StopReason, Usage } from "@earendil-works/pi-ai";
-import { completeSimple, getSupportedThinkingLevels, type Message, type ThinkingLevel } from "@earendil-works/pi-ai";
+import type { StopReason, Usage } from "@earendil-works/pi-ai";
+import type { Message, ThinkingLevel } from "@earendil-works/pi-ai";
 import {
 	type AgentToolResult,
 	type AgentToolUpdateCallback,
 	type ExtensionAPI,
 	type ExtensionContext,
-	type ToolInfo,
 } from "@earendil-works/pi-coding-agent";
 import { buildAdvisorMessages, DEFAULT_NUDGE_CONFIG, isVerificationCommand, shouldNudge, type ExecutorSignals, type NudgeConfig } from "./advisor-messages.js";
-import type { SelectItem } from "@earendil-works/pi-tui";
-import { Type } from "typebox";
-import { showAdvisorPicker, showEffortPicker, showMappingsPicker, showNudgePicker } from "./advisor-ui.js";
 import { completeAdvisor } from "./adaptive-thinking.js";
-import { DEFAULT_PROMPT_GUIDELINES, DEFAULT_PROMPT_SNIPPET } from "./guidance.js";
 import {
 	loadAdvisorConfig,
-	modelStubOf,
-	parseModelStub,
 	resolveAdvisorEntry,
-	saveAdvisorConfig,
-	validateGuidanceFields,
 	type AdvisorConfig,
 } from "./advisor/config.js";
+
+import { ADVISOR_SYSTEM_PROMPT } from "./advisor/prompt.js";
+import { getInventoryMessage } from "./advisor/inventory.js";
+import { getRuntimeCompleteSimple, loadCompleteSimple } from "./advisor/pi-compat.js";
+import {
+	ERR_ABORTED_DETAIL, ERR_CALL_ABORTED, ERR_EMPTY_RESPONSE, ERR_EMPTY_RESPONSE_DETAIL,
+	ERR_NO_MODEL, ERR_NO_MODEL_SELECTED, errCallFailed, errCallThrew, errMisconfigured,
+	errNoApiKey, errNoApiKeyDetail, msgConsulting,
+} from "./advisor/messages.js";
+import { getActiveExecutorKey, getAdvisorEffort, getAdvisorModel } from "./advisor/state.js";
 
 export { DEFAULT_PROMPT_GUIDELINES, DEFAULT_PROMPT_SNIPPET } from "./guidance.js";
 export { loadAdvisorConfig, modelStubOf, resolveAdvisorEntry, saveAdvisorConfig } from "./advisor/config.js";
 
 // ---------------------------------------------------------------------------
-// Constants — grouped by concern, flat named consts (no namespaced objects)
+// Compatibility adapter state retained until execution/nudges are extracted.
 // ---------------------------------------------------------------------------
 
-// Tool identity
-export const ADVISOR_TOOL_NAME = "advisor";
-const TOOL_LABEL = "Advisor";
+export {
+	ADVISOR_TOOL_NAME,
+} from "./advisor/messages.js";
+export { ADVISOR_SYSTEM_PROMPT } from "./advisor/prompt.js";
+export { ensureUserTailForAdvisor, stripInflightAdvisorCall } from "./advisor/context.js";
+export { getInventoryMessage, stableStringify } from "./advisor/inventory.js";
+export {
+	getActiveExecutorKey,
+	getAdvisorEffort,
+	getAdvisorModel,
+	setAdvisorEffort,
+	setAdvisorModel,
+} from "./advisor/state.js";
+export { applyAdvisorForExecutor, restoreAdvisorState } from "./advisor/restore.js";
+export { registerAdvisorBeforeAgentStart } from "./advisor/handlers.js";
 
-// Selector sentinels — double-underscore form is collision-proof against real provider:id keys
-const NO_ADVISOR_VALUE = "__no_advisor__";
-const OFF_VALUE = "__off__";
-const DEFAULT_EXECUTOR_VALUE = "__default__";
-const NUDGE_DEFAULT_VALUE = "__nudge_default__";
-
-// Nudge presets — named sensitivity levels surfaced in the /advisor command.
-type NudgePreset = "heavy" | "light" | "off";
-const NUDGE_PRESET_CONFIGS: Record<NudgePreset, NudgeConfig> = {
-	heavy: { preExecution: true, mutationBurst: 2, longRunToolCalls: 8, backoffToolCalls: 10 },
-	light: { preExecution: false, mutationBurst: 8, longRunToolCalls: 30, backoffToolCalls: 40 },
-	off: { disabled: true },
-};
-
-/** Map a stored NudgeConfig back to the nearest preset name, or "default" if unset/unrecognized. */
-function detectNudgePreset(nudge: NudgeConfig | undefined): NudgePreset | "default" {
-	if (!nudge) return "default";
-	if (nudge.disabled) return "off";
-	if ((nudge.mutationBurst ?? DEFAULT_NUDGE_CONFIG.mutationBurst) <= 3) return "heavy";
-	if ((nudge.mutationBurst ?? DEFAULT_NUDGE_CONFIG.mutationBurst) >= 6) return "light";
-	return "default";
-}
-
-/** Short label shown in the mappings overview for non-default nudge settings. */
-function nudgeSensitivityLabel(nudge: NudgeConfig | undefined): string | undefined {
-	const preset = detectNudgePreset(nudge);
-	return preset === "default" ? undefined : `nudge:${preset}`;
-}
-
-// Effort levels
-const BASE_EFFORT_LEVELS: ThinkingLevel[] = ["minimal", "low", "medium", "high"];
-const XHIGH_EFFORT_LEVEL: ThinkingLevel = "xhigh";
-const DEFAULT_EFFORT: ThinkingLevel = "high";
-const RECOMMENDED_EFFORT_SUFFIX = "  (recommended)";
-
-// UI — labels used by command flow; panel prose/titles live in advisor-ui.ts
-const CHECKMARK = " ✓";
-
-// Messages (static)
-const MSG_ADVISOR_DISABLED = "Advisor disabled";
-const MSG_CONFIG_SAVE_FAILED = "Advisor config could not be saved; selection was not changed.";
-const MSG_NO_ADVISOR_FOR_EXECUTOR = "No advisor configured for this executor; advisor disabled.";
-const MSG_REQUIRES_INTERACTIVE = "/advisor requires interactive mode";
-const MSG_ADVISOR_NUDGE = "Please advise on the executor's situation above.";
-
-// Errors (static)
-const ERR_NO_MODEL = "No advisor model is configured. The user can enable one with the /advisor command.";
-const ERR_CALL_ABORTED = "Advisor call was cancelled before it completed.";
-const ERR_EMPTY_RESPONSE = "Advisor returned no text content.";
-const ERR_NO_MODEL_SELECTED = "no advisor model selected";
-const ERR_EMPTY_RESPONSE_DETAIL = "empty response";
-const ERR_ABORTED_DETAIL = "aborted";
-const ERR_UNKNOWN = "unknown error";
-
-// Errors/messages (parameterized)
-const errMisconfigured = (label: string, err: string) => `Advisor (${label}) is misconfigured: ${err}`;
-const errNoApiKey = (label: string) => `Advisor (${label}) has no API key available.`;
-const errNoApiKeyDetail = (provider: string) => `no API key for ${provider}`;
-const errCallFailed = (err: string | undefined) => `Advisor call failed: ${err ?? ERR_UNKNOWN}`;
-const errCallThrew = (msg: string) => `Advisor call threw: ${msg}`;
-const errSelectionNotFound = (choice: string) => `Advisor selection not found: ${choice}`;
-const errModelUnavailable = (key: string) => `Previously configured advisor model ${key} is no longer available`;
-const msgAdvisorEnabled = (label: string, effort: ThinkingLevel | undefined, executorKey?: string) =>
-	`Advisor: ${label}${effort ? `, ${effort}` : ""}${executorKey ? ` (for ${executorKey})` : ""}`;
-const msgAdvisorRestored = (label: string, effort: ThinkingLevel | undefined, executorKey?: string) =>
-	`Advisor restored: ${label}${effort ? `, ${effort}` : ""}${executorKey ? ` (for ${executorKey})` : ""}`;
-const msgAdvisorSwapped = (label: string, effort: ThinkingLevel | undefined, executorKey: string) =>
-	`Advisor swapped to ${label}${effort ? `, ${effort}` : ""} (executor: ${executorKey})`;
-const msgSavedForExecutor = (executorStub: string, advisorStub: string, effort: ThinkingLevel | undefined) =>
-	`Saved for ${executorStub}: ${advisorStub}${effort ? ` / ${effort}` : ""}`;
-const msgClearedForExecutor = (executorStub: string) =>
-	`Advisor cleared for ${executorStub}`;
-const msgConsulting = (label: string, effort: ThinkingLevel | undefined) =>
-	`Consulting advisor (${label}${effort ? `, ${effort}` : ""})…`;
-
-// Run-level defaults
 export const MAX_USES_PER_RUN_DEFAULT = 5;
 const MAX_CONTEXT_MESSAGES_DEFAULT = 18;
 const RECENT_TOOL_SUMMARY_COUNT = 8;
 
-// Stage type and run-event record
 type AdvisorStage = "initial" | "recovery" | "final-check";
-
 export interface RunToolEvent {
 	toolName: string;
 	summary: string;
@@ -142,297 +75,41 @@ export interface RunToolEvent {
 	timestamp: number;
 }
 
-// ---------------------------------------------------------------------------
-// System prompt — loaded once at module init from prompts/advisor-system.txt
-// ---------------------------------------------------------------------------
-
-export const ADVISOR_SYSTEM_PROMPT = readFileSync(
-	fileURLToPath(new URL("./prompts/advisor-system.txt", import.meta.url)),
-	"utf-8",
-).trimEnd();
-
-// ---------------------------------------------------------------------------
-// Inventory state + serializer — stable tool-inventory Message for cache parity
-//
-// globalThis-keyed to survive module re-import on /new, /fork, /resume (mirrors
-// rpiv-btw/btw.ts:37, 87-98). Single-slot cache — the Pi tool registry is
-// process-scoped, so per-session keying would be redundant. Cache invalidates
-// only when the set of registered tool names changes.
-// ---------------------------------------------------------------------------
-
-const ADVISOR_STATE_KEY = Symbol.for("penumbral-pi-advisor");
-
-interface AdvisorState {
-	inventorySignature?: string;
-	inventoryMessage?: Message;
-	/** Executor key the current advisor was last resolved for. Survives module re-import on /new, /fork, /resume. */
-	activeExecutorKey?: string;
-	/**
-	 * Running count of non-advisor tool calls this session. Incremented in
-	 * tool_execution_end; cleared at session_start. Used for nudge backoff.
-	 */
+interface NudgeRuntimeState {
 	sessionToolCallCount?: number;
-	/**
-	 * sessionToolCallCount value when the last nudge was delivered.
-	 * undefined = no nudge has fired yet this session. Used to enforce backoff.
-	 */
 	sessionLastNudgeAtCount?: number;
 }
-
-function getAdvisorRuntimeState(): AdvisorState {
-	const g = globalThis as unknown as { [k: symbol]: AdvisorState | undefined };
-	let state = g[ADVISOR_STATE_KEY];
-	if (!state) {
-		state = {};
-		g[ADVISOR_STATE_KEY] = state;
-	}
-	return state;
+const NUDGE_STATE_KEY = Symbol.for("penumbral-pi-advisor-nudge");
+function getNudgeRuntimeState(): NudgeRuntimeState {
+	const root = globalThis as unknown as { [NUDGE_STATE_KEY]?: NudgeRuntimeState };
+	return root[NUDGE_STATE_KEY] ??= {};
 }
 
-// Recursive key-sorted JSON serializer — matches JSON.stringify semantics
-// (drops `undefined` in objects, emits `null` for `undefined` in arrays) but
-// guarantees stable key ordering across V8 insertion-order variation. Required
-// because nested TypeBox schemas may be authored in any order, and prompt
-// caching is byte-sensitive.
-export function stableStringify(value: unknown): string {
-	if (value === null || typeof value !== "object") {
-		return JSON.stringify(value);
-	}
-	if (Array.isArray(value)) {
-		return `[${value.map((v) => (v === undefined ? "null" : stableStringify(v))).join(",")}]`;
-	}
-	const obj = value as Record<string, unknown>;
-	const entries: string[] = [];
-	for (const k of Object.keys(obj).sort()) {
-		const v = obj[k];
-		if (v === undefined) continue;
-		entries.push(`${JSON.stringify(k)}:${stableStringify(v)}`);
-	}
-	return `{${entries.join(",")}}`;
-}
-
-function buildInventoryBlock(tools: ToolInfo[]): string {
-	// Omit `sourceInfo` — its `path` field is install-location-dependent and
-	// would bust cache parity across machines/reinstalls.
-	return tools
-		.map((t) => `### ${t.name}\n${t.description}\n\nParameters: ${stableStringify(t.parameters)}`)
-		.join("\n\n---\n\n");
-}
-
-// Strip the executor's in-flight advisor() toolCall from the tail assistant
-// message. That call is what invoked *us* — there is no matching toolResult
-// yet, and providers (Anthropic, GLM/zai, OpenAI) reject payloads with orphan
-// toolCalls. Name-targeted to leave any other trailing toolCalls visible.
-export function stripInflightAdvisorCall(messages: Message[]): Message[] {
-	if (messages.length === 0) return messages;
-	const last = messages[messages.length - 1];
-	if (last.role !== "assistant") return messages;
-	const filtered = last.content.filter((c) => !(c.type === "toolCall" && c.name === ADVISOR_TOOL_NAME));
-	if (filtered.length === last.content.length) return messages;
-	if (filtered.length === 0) return messages.slice(0, -1);
-	return [...messages.slice(0, -1), { ...last, content: filtered }];
-}
-
-// Some providers (recent Anthropic Claude models) reject payloads ending on an
-// assistant turn ("This model does not support assistant message prefill. The
-// conversation must end with a user message."). After stripInflightAdvisorCall
-// the tail can be assistant (e.g. the executor wrote thinking text before
-// calling advisor). Append a minimal user-role nudge to guarantee user-tail.
-export function ensureUserTailForAdvisor(messages: Message[]): Message[] {
-	if (messages.length === 0) return messages;
-	const last = messages[messages.length - 1];
-	if (last.role !== "assistant") return messages;
-	const nudge: Message = {
-		role: "user",
-		content: [{ type: "text", text: MSG_ADVISOR_NUDGE }],
-		timestamp: Date.now(),
-	};
-	return [...messages, nudge];
-}
-
-// Returns `undefined` when the registry is empty (no extensions loaded) so
-// callers can skip prepending an empty block that would still cost a cache unit.
-export function getInventoryMessage(tools: ToolInfo[]): Message | undefined {
-	if (tools.length === 0) return undefined;
-	const sorted = [...tools].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-	const signature = sorted.map((t) => t.name).join("|");
-	const state = getAdvisorRuntimeState();
-	if (state.inventorySignature === signature && state.inventoryMessage) {
-		return state.inventoryMessage;
-	}
-	const text = `## Available Executor Tools\n\n${buildInventoryBlock(sorted)}`;
-	const message: Message = {
-		role: "user",
-		content: [{ type: "text", text }],
-		timestamp: Date.now(),
-	};
-	state.inventorySignature = signature;
-	state.inventoryMessage = message;
-	return message;
-}
-
-// ---------------------------------------------------------------------------
-// Module state — in-memory, resets each session
-// ---------------------------------------------------------------------------
-
-let selectedAdvisor: Model<Api> | undefined;
-let selectedAdvisorEffort: ThinkingLevel | undefined;
-
-export function getAdvisorModel(): Model<Api> | undefined {
-	return selectedAdvisor;
-}
-
-export function setAdvisorModel(model: Model<Api> | undefined): void {
-	selectedAdvisor = model;
-}
-
-export function getAdvisorEffort(): ThinkingLevel | undefined {
-	return selectedAdvisorEffort;
-}
-
-export function setAdvisorEffort(effort: ThinkingLevel | undefined): void {
-	selectedAdvisorEffort = effort;
-}
-
-// Run-level state — reset each agent run via resetRunState() in agent_start handler.
 let runToolEvents: RunToolEvent[] = [];
 let usesThisRun = 0;
-// Tracks whether we've already injected the agent-facing nudge this run, so a
-// long edit streak doesn't pile up duplicate nudges in the model's context.
 let nudgedThisRun = false;
-
 export function getRunToolEvents(): RunToolEvent[] { return runToolEvents; }
 export function getUsesThisRun(): number { return usesThisRun; }
 export function getNudgedThisRun(): boolean { return nudgedThisRun; }
 export function setNudgedThisRun(value: boolean): void { nudgedThisRun = value; }
 export function resetRunState(): void { runToolEvents = []; usesThisRun = 0; nudgedThisRun = false; }
 export function pushRunToolEvent(event: RunToolEvent): void { runToolEvents.push(event); }
-
-// Session-level nudge state — stored in globalThis, only cleared at session_start.
-export function getSessionToolCallCount(): number { return getAdvisorRuntimeState().sessionToolCallCount ?? 0; }
+export function getSessionToolCallCount(): number { return getNudgeRuntimeState().sessionToolCallCount ?? 0; }
 export function incrementSessionToolCallCount(): void {
-	const state = getAdvisorRuntimeState();
+	const state = getNudgeRuntimeState();
 	state.sessionToolCallCount = (state.sessionToolCallCount ?? 0) + 1;
 }
-export function getSessionLastNudgeAtCount(): number | undefined { return getAdvisorRuntimeState().sessionLastNudgeAtCount; }
-export function setSessionLastNudgeAtCount(count: number): void { getAdvisorRuntimeState().sessionLastNudgeAtCount = count; }
+export function getSessionLastNudgeAtCount(): number | undefined { return getNudgeRuntimeState().sessionLastNudgeAtCount; }
+export function setSessionLastNudgeAtCount(count: number): void { getNudgeRuntimeState().sessionLastNudgeAtCount = count; }
 export function resetSessionNudgeState(): void {
-	const state = getAdvisorRuntimeState();
+	const state = getNudgeRuntimeState();
 	state.sessionToolCallCount = 0;
 	state.sessionLastNudgeAtCount = undefined;
 }
 
-export function getActiveExecutorKey(): string | undefined {
-	return getAdvisorRuntimeState().activeExecutorKey;
-}
-
-/**
- * Resolve nudge config for the current executor.
- *
- * Resolution order (later layers win):
- *   DEFAULT_NUDGE_CONFIG → config.nudge (global) → resolvedEntry.nudge (per-executor)
- *
- * This mirrors the byExecutor → default fallback that resolveAdvisorEntry uses,
- * so per-executor nudge settings are always more specific than the global default.
- */
 export function resolveNudgeConfig(config: AdvisorConfig, executorStub?: string): Required<NudgeConfig> {
 	const entry = resolveAdvisorEntry(config, executorStub);
-	return {
-		...DEFAULT_NUDGE_CONFIG,
-		...(config.nudge ?? {}),
-		...(entry?.nudge ?? {}),
-	};
-}
-
-
-
-// ---------------------------------------------------------------------------
-// Apply / restore — used by session_start and model_select handlers
-// ---------------------------------------------------------------------------
-
-function ensureToolActive(pi: ExtensionAPI, active: boolean): void {
-	const tools = pi.getActiveTools();
-	const has = tools.includes(ADVISOR_TOOL_NAME);
-	if (active && !has) {
-		pi.setActiveTools([...tools, ADVISOR_TOOL_NAME]);
-	} else if (!active && has) {
-		pi.setActiveTools(tools.filter((n) => n !== ADVISOR_TOOL_NAME));
-	}
-}
-
-/**
- * Resolve and apply the advisor for the given executor model.
- *
- * `reason` controls the notification shape:
- *   - "restore": initial session_start ("Advisor restored: ...")
- *   - "swap":    user changed executor mid-session ("Advisor swapped to ...")
- *
- * No-ops if the resolved advisor is unchanged from the currently selected one.
- */
-export function applyAdvisorForExecutor(
-	executor: Model<Api> | undefined,
-	ctx: ExtensionContext,
-	pi: ExtensionAPI,
-	reason: "restore" | "swap",
-): void {
-	const executorStub = modelStubOf(executor);
-	const config = loadAdvisorConfig();
-	const entry = resolveAdvisorEntry(config, executorStub);
-
-	const previousAdvisor = getAdvisorModel();
-	const previousAdvisorStub = modelStubOf(previousAdvisor);
-	const previousEffort = getAdvisorEffort();
-	const runtime = getAdvisorRuntimeState();
-	const previousExecutorStub = runtime.activeExecutorKey;
-
-	runtime.activeExecutorKey = executorStub;
-
-	if (!entry?.modelStub) {
-		// No advisor for this executor — disable cleanly.
-		setAdvisorModel(undefined);
-		setAdvisorEffort(undefined);
-		ensureToolActive(pi, false);
-		if (reason === "swap" && previousAdvisor && ctx.hasUI && executorStub !== previousExecutorStub) {
-			ctx.ui.notify(MSG_NO_ADVISOR_FOR_EXECUTOR, "info");
-		}
-		return;
-	}
-
-	const parsed = parseModelStub(entry.modelStub);
-	if (!parsed) return;
-
-	const model = ctx.modelRegistry.find(parsed.provider, parsed.modelId);
-	if (!model) {
-		setAdvisorModel(undefined);
-		setAdvisorEffort(undefined);
-		ensureToolActive(pi, false);
-		if (ctx.hasUI) {
-			ctx.ui.notify(errModelUnavailable(entry.modelStub), "warning");
-		}
-		return;
-	}
-
-	const newStub = `${model.provider}:${model.id}`;
-	const unchanged = previousAdvisorStub === newStub && previousEffort === entry.effort;
-
-	setAdvisorModel(model);
-	setAdvisorEffort(entry.effort);
-	ensureToolActive(pi, true);
-
-	if (unchanged) return;
-
-	if (ctx.hasUI) {
-		if (reason === "restore") {
-			ctx.ui.notify(msgAdvisorRestored(newStub, entry.effort, executorStub), "info");
-		} else {
-			ctx.ui.notify(msgAdvisorSwapped(newStub, entry.effort, executorStub ?? "unknown"), "info");
-		}
-	}
-}
-
-/** Backwards-compatible entry point retained for the session_start handler in index.ts. */
-export function restoreAdvisorState(ctx: ExtensionContext, pi: ExtensionAPI): void {
-	applyAdvisorForExecutor(ctx.model, ctx, pi, "restore");
+	return { ...DEFAULT_NUDGE_CONFIG, ...(config.nudge ?? {}), ...(entry?.nudge ?? {}) };
 }
 
 // ---------------------------------------------------------------------------
@@ -633,18 +310,18 @@ async function executeAdvisor(
 	});
 
 	try {
+		const runtimeComplete = getRuntimeCompleteSimple(ctx.modelRegistry);
+		const complete = runtimeComplete ?? await loadCompleteSimple();
+		const options = runtimeComplete
+			? { signal, reasoning: effort }
+			: { apiKey: auth.apiKey, headers: auth.headers, signal, reasoning: effort };
 		const response = await completeAdvisor(
 			advisor,
 			// `tools: []` reaffirms the "never calls tools" contract even when
 			// `messages` contains prior toolCall/toolResult blocks (btw.ts:235).
 			{ systemPrompt: ADVISOR_SYSTEM_PROMPT, messages, tools: [] },
-			{
-				apiKey: auth.apiKey,
-				headers: auth.headers,
-				signal,
-				reasoning: effort,
-			},
-			completeSimple,
+			options,
+			complete,
 		);
 
 		if (response.stopReason === "aborted") {
@@ -705,211 +382,4 @@ async function executeAdvisor(
 		const message = err instanceof Error ? err.message : String(err);
 		return buildErrorResult(advisorLabel, errCallThrew(message), message);
 	}
-}
-
-// ---------------------------------------------------------------------------
-// Tool registration — zero-param schema, curated description/snippet/guidelines
-// ---------------------------------------------------------------------------
-
-const AdvisorParams = Type.Object({
-	stage: Type.Optional(
-		Type.Union([Type.Literal("initial"), Type.Literal("recovery"), Type.Literal("final-check")]),
-	),
-});
-
-const ADVISOR_DESCRIPTION =
-	"Escalate to a stronger reviewer model for guidance. When you need " +
-	"stronger judgment — a complex decision, an ambiguous failure, a problem " +
-	"you're circling without progress — escalate to the advisor model for " +
-	"guidance, then resume. Optional stage parameter: 'initial' (still exploring), " +
-	"'recovery' (stuck or after failure), 'final-check' (implementation done, before declaring complete). " +
-	"When stage is omitted it is auto-detected from recent tool activity. " +
-	"Your full conversation history is automatically forwarded. " +
-	"The advisor sees the task, every tool call you've made, every result you've seen.";
-
-export function registerAdvisorTool(pi: ExtensionAPI): void {
-	const guidance = validateGuidanceFields(loadAdvisorConfig().guidance);
-	pi.registerTool({
-		name: ADVISOR_TOOL_NAME,
-		label: TOOL_LABEL,
-		description: ADVISOR_DESCRIPTION,
-		promptSnippet: guidance.promptSnippet ?? DEFAULT_PROMPT_SNIPPET,
-		promptGuidelines: guidance.promptGuidelines ?? DEFAULT_PROMPT_GUIDELINES,
-		parameters: AdvisorParams,
-
-		async execute(_toolCallId, params, signal, onUpdate, ctx) {
-			return executeAdvisor(ctx, pi, signal, onUpdate, params.stage);
-		},
-	});
-}
-
-// ---------------------------------------------------------------------------
-// before_agent_start handler — strip advisor from active tools when disabled
-// ---------------------------------------------------------------------------
-
-export function registerAdvisorBeforeAgentStart(pi: ExtensionAPI): void {
-	pi.on("before_agent_start", async () => {
-		if (!getAdvisorModel()) {
-			const active = pi.getActiveTools();
-			if (active.includes(ADVISOR_TOOL_NAME)) {
-				pi.setActiveTools(active.filter((n) => n !== ADVISOR_TOOL_NAME));
-			}
-		}
-	});
-}
-
-// ---------------------------------------------------------------------------
-// /advisor slash command — mappings overview → model picker → effort picker
-// ---------------------------------------------------------------------------
-
-export function registerAdvisorCommand(pi: ExtensionAPI): void {
-	pi.registerCommand("advisor", {
-		description: "Configure per-executor advisor model pairings",
-		handler: async (_args, ctx) => {
-			if (!ctx.hasUI) {
-				ctx.ui.notify(MSG_REQUIRES_INTERACTIVE, "error");
-				return;
-			}
-
-			const availableModels = ctx.modelRegistry.getAvailable();
-			const config = loadAdvisorConfig();
-			const executorStubActive = modelStubOf(ctx.model);
-
-			// Helper: human-readable label for an advisor entry.
-			function advisorLabel(entry: AdvisorEntry | undefined): string {
-				if (!entry?.modelStub) return "—";
-				const parsed = parseModelStub(entry.modelStub);
-				const model = parsed
-					? availableModels.find((m) => m.provider === parsed.provider && m.id === parsed.modelId)
-					: undefined;
-				const name = model?.name ?? entry.modelStub;
-				const nudgeHint = nudgeSensitivityLabel(entry.nudge);
-				return `${name}${entry.effort ? ` / ${entry.effort}` : ""}${nudgeHint ? `  [${nudgeHint}]` : ""}`;
-			}
-
-			// --- Step 1: Mappings overview ---
-			const mappingItems: SelectItem[] = availableModels.map((m) => {
-				const stub = `${m.provider}:${m.id}`;
-				const isActive = stub === executorStubActive;
-				const entry = config.byExecutor?.[stub];
-				return {
-					value: stub,
-					label: `${m.name}  (${m.provider})${isActive ? CHECKMARK : ""}    \u2192  ${advisorLabel(entry)}`,
-				};
-			});
-			mappingItems.push({
-				value: DEFAULT_EXECUTOR_VALUE,
-				label: `[default fallback]    \u2192  ${advisorLabel(config.default)}`,
-			});
-
-			const initialIdx = mappingItems.findIndex((item) => item.value === executorStubActive);
-			const executorChoice = await showMappingsPicker(ctx, mappingItems, initialIdx >= 0 ? initialIdx : undefined);
-			if (!executorChoice) return;
-
-			// executorStub: undefined means "default", string means a specific executor
-			const executorStub = executorChoice === DEFAULT_EXECUTOR_VALUE ? undefined : executorChoice;
-
-			// The active session's in-memory advisor needs updating when:
-			// - configuring the active executor directly, OR
-			// - configuring default AND active executor has no specific byExecutor entry
-			const executorIsActive =
-				executorStub === executorStubActive ||
-				(executorStub === undefined && !config.byExecutor?.[executorStubActive ?? ""]?.modelStub);
-
-			// --- Step 2: Advisor model picker ---
-			const currentEntry = executorStub ? config.byExecutor?.[executorStub] : config.default;
-			const currentAdvisorStub = currentEntry?.modelStub;
-			const currentAdvisorEffort = currentEntry?.effort;
-
-			const items: SelectItem[] = availableModels.map((m) => {
-				const stub = `${m.provider}:${m.id}`;
-				const check = stub === currentAdvisorStub ? CHECKMARK : "";
-				return { value: stub, label: `${m.name}  (${m.provider})${check}` };
-			});
-			items.push({
-				value: NO_ADVISOR_VALUE,
-				label: currentAdvisorStub === undefined ? `No advisor${CHECKMARK}` : "No advisor",
-			});
-
-			const choice = await showAdvisorPicker(ctx, items);
-			if (!choice) return;
-
-			if (choice === NO_ADVISOR_VALUE) {
-				if (!saveAdvisorConfig(undefined, undefined, executorStub)) {
-					ctx.ui.notify(MSG_CONFIG_SAVE_FAILED, "error");
-					return;
-				}
-				if (executorIsActive) {
-					setAdvisorModel(undefined);
-					setAdvisorEffort(undefined);
-					getAdvisorRuntimeState().activeExecutorKey = executorStubActive;
-					ensureToolActive(pi, false);
-					ctx.ui.notify(MSG_ADVISOR_DISABLED, "info");
-				} else {
-					ctx.ui.notify(msgClearedForExecutor(executorStub!), "info");
-				}
-				return;
-			}
-
-			const picked = availableModels.find((m) => `${m.provider}:${m.id}` === choice);
-			if (!picked) {
-				ctx.ui.notify(errSelectionNotFound(choice), "error");
-				return;
-			}
-
-			// --- Step 3: Effort picker ---
-			let effortChoice: ThinkingLevel | undefined;
-			if (picked.reasoning) {
-				const levels = getSupportedThinkingLevels(picked).includes("xhigh")
-					? [...BASE_EFFORT_LEVELS, XHIGH_EFFORT_LEVEL]
-					: BASE_EFFORT_LEVELS;
-
-				const effortItems: SelectItem[] = [
-					{ value: OFF_VALUE, label: "off" },
-					...levels.map((level) => ({
-						value: level,
-						label: level === DEFAULT_EFFORT ? `${level}${RECOMMENDED_EFFORT_SUFFIX}` : level,
-					})),
-				];
-
-				const effortResult = await showEffortPicker(ctx, effortItems, currentAdvisorEffort, DEFAULT_EFFORT);
-				if (!effortResult) return;
-				effortChoice = effortResult === OFF_VALUE ? undefined : (effortResult as ThinkingLevel);
-			}
-
-			// --- Step 4: Nudge sensitivity picker ---
-			const currentNudgePreset = detectNudgePreset(currentEntry?.nudge);
-			const nudgeItems = [
-				{ value: "heavy", label: `heavy  (nudge early and often)${currentNudgePreset === "heavy" ? CHECKMARK : ""}` },
-				{ value: NUDGE_DEFAULT_VALUE, label: `default  (balanced)${currentNudgePreset === "default" ? CHECKMARK : ""}` },
-				{ value: "light", label: `light  (nudge infrequently)${currentNudgePreset === "light" ? CHECKMARK : ""}` },
-				{ value: "off", label: `off  (no automatic nudges)${currentNudgePreset === "off" ? CHECKMARK : ""}` },
-			];
-			const nudgePresetOrder = ["heavy", NUDGE_DEFAULT_VALUE, "light", "off"];
-			const nudgeInitialIdx = nudgePresetOrder.indexOf(currentNudgePreset === "default" ? NUDGE_DEFAULT_VALUE : currentNudgePreset);
-
-			const nudgeResult = await showNudgePicker(ctx, nudgeItems, nudgeInitialIdx >= 0 ? nudgeInitialIdx : 1);
-			if (!nudgeResult) return;
-
-			const nudgeConfig = nudgeResult === NUDGE_DEFAULT_VALUE
-				? undefined
-				: NUDGE_PRESET_CONFIGS[nudgeResult as NudgePreset];
-
-			const pickedStub = `${picked.provider}:${picked.id}`;
-			if (!saveAdvisorConfig(pickedStub, effortChoice, executorStub, nudgeConfig)) {
-				ctx.ui.notify(MSG_CONFIG_SAVE_FAILED, "error");
-				return;
-			}
-
-			if (executorIsActive) {
-				setAdvisorModel(picked);
-				setAdvisorEffort(effortChoice);
-				getAdvisorRuntimeState().activeExecutorKey = executorStubActive;
-				ensureToolActive(pi, true);
-				ctx.ui.notify(msgAdvisorEnabled(pickedStub, effortChoice, executorStub ?? "default"), "info");
-			} else {
-				ctx.ui.notify(msgSavedForExecutor(executorStub!, pickedStub, effortChoice), "info");
-			}
-		},
-	});
 }
