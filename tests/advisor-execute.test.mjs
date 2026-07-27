@@ -1,0 +1,170 @@
+import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test, { afterEach, beforeEach } from "node:test";
+
+import { __setAdvisorConfigPathForTests } from "../extensions/advisor/advisor/config.ts";
+import { executeAdvisor, resetAdvisorUsage } from "../extensions/advisor/advisor/execute.ts";
+import { setAdvisorEffort, setAdvisorModel } from "../extensions/advisor/advisor/state.ts";
+import { resetRunState } from "../extensions/advisor/advisor.ts";
+
+const tempDirs = [];
+let configPath;
+let restoreConfigPath;
+
+function response(text = "advice", stopReason = "stop", errorMessage) {
+	return {
+		role: "assistant",
+		content: text === undefined ? [] : [{ type: "text", text }],
+		stopReason,
+		errorMessage,
+		usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 },
+		timestamp: Date.now(),
+	};
+}
+
+function makeContext({ runtimeComplete, messages } = {}) {
+	const runtime = runtimeComplete ? { completeSimple: runtimeComplete } : undefined;
+	return {
+		modelRegistry: {
+			getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "test-key", headers: { "x-test": "yes" } }),
+			...(runtime ? { runtime } : {}),
+		},
+		sessionManager: {
+			getEntries: () => messages ?? [{ type: "message", message: { role: "user", content: [{ type: "text", text: "task" }], timestamp: 1 } }],
+			getLeafId: () => "leaf",
+		},
+	};
+}
+
+const pi = { getAllTools: () => [] };
+
+beforeEach(() => {
+	const dir = mkdtempSync(join(tmpdir(), "pi-advisor-execute-"));
+	tempDirs.push(dir);
+	configPath = join(dir, "pi-advisor.json");
+	writeFileSync(configPath, "{}\n");
+	restoreConfigPath = __setAdvisorConfigPathForTests(configPath);
+	setAdvisorModel({ provider: "litellm", id: "claude-opus-4-8" });
+	setAdvisorEffort("high");
+	resetAdvisorUsage();
+	resetRunState();
+	delete globalThis.__piAdvisorCompatCompleteSimple;
+	delete globalThis.__piCodingAgentBuildSessionContext;
+});
+
+afterEach(() => {
+	restoreConfigPath?.();
+	for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+	delete globalThis.__piAdvisorCompatCompleteSimple;
+	delete globalThis.__piCodingAgentBuildSessionContext;
+});
+
+test("runtime completion uses canonical context and adaptive onPayload without explicit auth overrides", async () => {
+	const rawMessage = { role: "user", content: [{ type: "text", text: "RAW PRE-COMPACTION DETAIL" }], timestamp: 1 };
+	globalThis.__piCodingAgentBuildSessionContext = () => ({
+		messages: [
+			{ role: "compactionSummary", summary: "COMPACTED SUMMARY", tokensBefore: 100, timestamp: 2 },
+			{ role: "branchSummary", summary: "BRANCH SUMMARY", fromId: "old-leaf", timestamp: 3 },
+			{ role: "user", content: [{ type: "text", text: "current task" }], timestamp: 4 },
+		],
+		thinkingLevel: "off",
+		model: null,
+	});
+	let receivedOptions;
+	let receivedMessages;
+	const runtimeComplete = async (_model, context, options) => {
+		receivedOptions = options;
+		receivedMessages = context.messages;
+		const normalized = options.onPayload({ reasoning_effort: "high" }, { provider: "litellm", id: "claude-opus-4-8" });
+		assert.deepEqual(normalized, { thinking: { type: "adaptive" }, output_config: { effort: "high" } });
+		return response();
+	};
+
+	const result = await executeAdvisor(makeContext({ runtimeComplete, messages: [rawMessage] }), pi, undefined, undefined);
+
+	assert.equal(result.content[0].text, "advice");
+	assert.equal(receivedOptions.reasoning, "high");
+	assert.equal("apiKey" in receivedOptions, false);
+	assert.equal("headers" in receivedOptions, false);
+	const serialized = JSON.stringify(receivedMessages);
+	assert.match(serialized, /COMPACTED SUMMARY/);
+	assert.match(serialized, /BRANCH SUMMARY/);
+	assert.doesNotMatch(serialized, /RAW PRE-COMPACTION DETAIL/);
+});
+
+test("compatibility completion receives auth and adaptive onPayload", async () => {
+	let receivedOptions;
+	globalThis.__piAdvisorCompatCompleteSimple = async (_model, _context, options) => {
+		receivedOptions = options;
+		const normalized = options.onPayload({ reasoning_effort: "minimal" }, { provider: "litellm", id: "claude-opus-4-8" });
+		assert.deepEqual(normalized, { thinking: { type: "adaptive" }, output_config: { effort: "low" } });
+		return response("compat advice");
+	};
+
+	const result = await executeAdvisor(makeContext(), pi, undefined, undefined);
+
+	assert.equal(result.content[0].text, "compat advice");
+	assert.equal(receivedOptions.apiKey, "test-key");
+	assert.deepEqual(receivedOptions.headers, { "x-test": "yes" });
+});
+
+test("returns structured results for usage, model, auth, context, response, and thrown failures", async (t) => {
+	await t.test("usage limit", async () => {
+		writeFileSync(configPath, JSON.stringify({ maxUsesPerRun: 0 }));
+		const ctx = makeContext({ runtimeComplete: async () => response() });
+		const result = await executeAdvisor(ctx, pi, undefined, undefined);
+		assert.equal(result.details.errorMessage, "max_uses_exceeded");
+	});
+
+	await t.test("no model", async () => {
+		resetAdvisorUsage();
+		setAdvisorModel(undefined);
+		const result = await executeAdvisor(makeContext(), pi, undefined, undefined);
+		assert.equal(result.details.errorMessage, "no advisor model selected");
+		assert.equal("advisorModel" in result.details, false);
+	});
+
+	await t.test("auth", async () => {
+		resetAdvisorUsage();
+		setAdvisorModel({ provider: "litellm", id: "claude-opus-4-8" });
+		const ctx = makeContext();
+		ctx.modelRegistry.getApiKeyAndHeaders = async () => ({ ok: false, error: "bad auth" });
+		const result = await executeAdvisor(ctx, pi, undefined, undefined);
+		assert.equal(result.details.errorMessage, "bad auth");
+	});
+
+	await t.test("no context", async () => {
+		resetAdvisorUsage();
+		globalThis.__piCodingAgentBuildSessionContext = () => ({ messages: [], thinkingLevel: "off", model: null });
+		const result = await executeAdvisor(makeContext(), pi, undefined, undefined);
+		assert.equal(result.details.errorMessage, "no_context");
+	});
+
+	await t.test("aborted", async () => {
+		resetAdvisorUsage();
+		const result = await executeAdvisor(makeContext({ runtimeComplete: async () => response(undefined, "aborted") }), pi, undefined, undefined);
+		assert.equal(result.details.stopReason, "aborted");
+		assert.equal(result.details.errorMessage, "aborted");
+	});
+
+	await t.test("error", async () => {
+		resetAdvisorUsage();
+		const result = await executeAdvisor(makeContext({ runtimeComplete: async () => response(undefined, "error", "502") }), pi, undefined, undefined);
+		assert.equal(result.details.stopReason, "error");
+		assert.equal(result.details.errorMessage, "502");
+	});
+
+	await t.test("empty", async () => {
+		resetAdvisorUsage();
+		const result = await executeAdvisor(makeContext({ runtimeComplete: async () => response("   ") }), pi, undefined, undefined);
+		assert.equal(result.details.errorMessage, "empty response");
+	});
+
+	await t.test("thrown", async () => {
+		resetAdvisorUsage();
+		const result = await executeAdvisor(makeContext({ runtimeComplete: async () => { throw new Error("boom"); } }), pi, undefined, undefined);
+		assert.equal(result.details.errorMessage, "boom");
+	});
+});

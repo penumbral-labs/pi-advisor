@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 
 const runtimeStubs = new Map([
 	["@earendil-works/pi-ai", new URL("./runtime-stubs/pi-ai.mjs", import.meta.url).href],
+	["@earendil-works/pi-ai/compat", new URL("./runtime-stubs/pi-ai-compat.mjs", import.meta.url).href],
 	["@earendil-works/pi-coding-agent", new URL("./runtime-stubs/pi-coding-agent.mjs", import.meta.url).href],
 	["@earendil-works/pi-tui", new URL("./runtime-stubs/pi-tui.mjs", import.meta.url).href],
 	["typebox", new URL("./runtime-stubs/typebox.mjs", import.meta.url).href],

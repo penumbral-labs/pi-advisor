@@ -145,6 +145,54 @@ test("signals block reflects mutations, verifications, and failures", () => {
 	assert.match(String(contextMsg.content), /\$ tsc \(exit 2\)/);
 });
 
+test("curates canonical messages while preserving compaction and branch summaries", () => {
+	const canonical = [
+		{ role: "user", content: [{ type: "text", text: "The conversation history before this point was compacted into the following summary:\n\n<summary>\nCOMPACTED SUMMARY\n</summary>" }], timestamp: 1 },
+		{ role: "user", content: [{ type: "text", text: "The following is a summary of a branch that this conversation came back from:\n\n<summary>\nBRANCH SUMMARY\n</summary>" }], timestamp: 2 },
+		{ role: "assistant", content: [{ type: "text", text: "working" }, { type: "toolCall", name: "read", arguments: {} }], timestamp: 3 },
+		{ role: "toolResult", content: [{ type: "text", text: "NOISY TOOL PAYLOAD" }], timestamp: 4 },
+		{ role: "user", content: [{ type: "text", text: "latest task" }], timestamp: 5 },
+	];
+
+	const messages = buildAdvisorMessages(canonical, { stage: "initial", reason: "test" }, "", 8);
+	const serialized = JSON.stringify(messages);
+	assert.match(serialized, /COMPACTED SUMMARY/);
+	assert.match(serialized, /BRANCH SUMMARY/);
+	assert.doesNotMatch(serialized, /NOISY TOOL PAYLOAD/);
+	assert.doesNotMatch(serialized, /toolCall/);
+});
+
+test("canonical summaries survive when they fall outside the bounded first and last windows", () => {
+	const canonical = Array.from({ length: 12 }, (_, index) => ({
+		role: "user",
+		content: [{ type: "text", text: `message ${index}` }],
+		timestamp: index,
+	}));
+	canonical[5] = {
+		role: "user",
+		content: [{ type: "text", text: "The following is a summary of a branch that this conversation came back from:\n\n<summary>\nMIDDLE BRANCH SUMMARY\n</summary>" }],
+		timestamp: 5,
+	};
+
+	const messages = buildAdvisorMessages(canonical, { stage: "initial", reason: "test" }, "", 6);
+	assert.match(JSON.stringify(messages), /MIDDLE BRANCH SUMMARY/);
+	assert.match(JSON.stringify(messages), /earlier transcript messages omitted/);
+});
+
+test("stage inference and explicit overrides describe the executor state", async () => {
+	const { buildExecutorContext, detectAdvisorStage } = await import("../extensions/advisor/advisor/execution-context.ts");
+	const events = [
+		{ toolName: "read", summary: "read a", isError: false, timestamp: 1 },
+		{ toolName: "edit", summary: "edit a", isError: false, timestamp: 2 },
+		{ toolName: "bash", summary: "$ npm test", command: "npm test", isError: false, timestamp: 3 },
+	];
+	assert.equal(detectAdvisorStage(events, 1).stage, "final-check");
+	assert.equal(detectAdvisorStage([{ toolName: "bash", summary: "$ test", isError: true, timestamp: 1 }], 1).stage, "recovery");
+	assert.equal(detectAdvisorStage([{ toolName: "read", summary: "read a", isError: false, timestamp: 1 }], 1).stage, "initial");
+	assert.equal(buildExecutorContext(events, 1, "recovery").stageInfo.stage, "recovery");
+	assert.match(buildExecutorContext(events, 1, "recovery").stageInfo.reason, /explicitly signaled/);
+});
+
 // ---------------------------------------------------------------------------
 // shouldNudge
 // ---------------------------------------------------------------------------

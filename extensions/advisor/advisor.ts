@@ -13,31 +13,15 @@
  * via pi.setActiveTools(). Selection is in-memory and resets each session.
  */
 
-import type { StopReason, Usage } from "@earendil-works/pi-ai";
-import type { Message, ThinkingLevel } from "@earendil-works/pi-ai";
-import {
-	type AgentToolResult,
-	type AgentToolUpdateCallback,
-	type ExtensionAPI,
-	type ExtensionContext,
-} from "@earendil-works/pi-coding-agent";
-import { buildAdvisorMessages, DEFAULT_NUDGE_CONFIG, isVerificationCommand, shouldNudge, type ExecutorSignals, type NudgeConfig } from "./advisor-messages.js";
-import { completeAdvisor } from "./adaptive-thinking.js";
+import { DEFAULT_NUDGE_CONFIG, shouldNudge, type NudgeConfig } from "./advisor-messages.js";
 import {
 	loadAdvisorConfig,
 	resolveAdvisorEntry,
 	type AdvisorConfig,
 } from "./advisor/config.js";
 
-import { ADVISOR_SYSTEM_PROMPT } from "./advisor/prompt.js";
-import { getInventoryMessage } from "./advisor/inventory.js";
-import { getRuntimeCompleteSimple, loadCompleteSimple } from "./advisor/pi-compat.js";
-import {
-	ERR_ABORTED_DETAIL, ERR_CALL_ABORTED, ERR_EMPTY_RESPONSE, ERR_EMPTY_RESPONSE_DETAIL,
-	ERR_NO_MODEL, ERR_NO_MODEL_SELECTED, errCallFailed, errCallThrew, errMisconfigured,
-	errNoApiKey, errNoApiKeyDetail, msgConsulting,
-} from "./advisor/messages.js";
-import { getActiveExecutorKey, getAdvisorEffort, getAdvisorModel } from "./advisor/state.js";
+import { resetRunToolEvents, type RunToolEvent } from "./advisor/execution-context.js";
+import { getAdvisorUsesThisRun, resetAdvisorUsage } from "./advisor/execute.js";
 
 export { DEFAULT_PROMPT_GUIDELINES, DEFAULT_PROMPT_SNIPPET } from "./guidance.js";
 export { loadAdvisorConfig, modelStubOf, resolveAdvisorEntry, saveAdvisorConfig } from "./advisor/config.js";
@@ -62,18 +46,9 @@ export {
 export { applyAdvisorForExecutor, restoreAdvisorState } from "./advisor/restore.js";
 export { registerAdvisorBeforeAgentStart } from "./advisor/handlers.js";
 
-export const MAX_USES_PER_RUN_DEFAULT = 5;
-const MAX_CONTEXT_MESSAGES_DEFAULT = 18;
-const RECENT_TOOL_SUMMARY_COUNT = 8;
-
-type AdvisorStage = "initial" | "recovery" | "final-check";
-export interface RunToolEvent {
-	toolName: string;
-	summary: string;
-	command?: string;
-	isError: boolean;
-	timestamp: number;
-}
+export { MAX_USES_PER_RUN_DEFAULT } from "./advisor/execute.js";
+export type { RunToolEvent } from "./advisor/execution-context.js";
+export { executeAdvisor } from "./advisor/execute.js";
 
 interface NudgeRuntimeState {
 	sessionToolCallCount?: number;
@@ -85,15 +60,12 @@ function getNudgeRuntimeState(): NudgeRuntimeState {
 	return root[NUDGE_STATE_KEY] ??= {};
 }
 
-let runToolEvents: RunToolEvent[] = [];
-let usesThisRun = 0;
 let nudgedThisRun = false;
-export function getRunToolEvents(): RunToolEvent[] { return runToolEvents; }
-export function getUsesThisRun(): number { return usesThisRun; }
+export { getRunToolEvents, pushRunToolEvent } from "./advisor/execution-context.js";
+export function getUsesThisRun(): number { return getAdvisorUsesThisRun(); }
 export function getNudgedThisRun(): boolean { return nudgedThisRun; }
 export function setNudgedThisRun(value: boolean): void { nudgedThisRun = value; }
-export function resetRunState(): void { runToolEvents = []; usesThisRun = 0; nudgedThisRun = false; }
-export function pushRunToolEvent(event: RunToolEvent): void { runToolEvents.push(event); }
+export function resetRunState(): void { resetRunToolEvents(); resetAdvisorUsage(); nudgedThisRun = false; }
 export function getSessionToolCallCount(): number { return getNudgeRuntimeState().sessionToolCallCount ?? 0; }
 export function incrementSessionToolCallCount(): void {
 	const state = getNudgeRuntimeState();
@@ -113,28 +85,8 @@ export function resolveNudgeConfig(config: AdvisorConfig, executorStub?: string)
 }
 
 // ---------------------------------------------------------------------------
-// Core execute logic — curate context, call advisor, return structured result
+// Tool execution tracking retained until nudges are extracted.
 // ---------------------------------------------------------------------------
-
-export interface AdvisorDetails {
-	advisorModel?: string;
-	effort?: ThinkingLevel;
-	usage?: Usage;
-	stopReason?: StopReason;
-	errorMessage?: string;
-}
-
-function buildErrorResult(
-	advisorLabel: string | undefined,
-	userText: string,
-	errorMessage: string,
-): AgentToolResult<AdvisorDetails> {
-	const effort = getAdvisorEffort();
-	return {
-		content: [{ type: "text", text: userText }],
-		details: advisorLabel ? { advisorModel: advisorLabel, effort, errorMessage } : { effort, errorMessage },
-	};
-}
 
 function squeezeWhitespace(text: string): string {
 	return text.replace(/\s+/g, " ").trim();
@@ -194,192 +146,5 @@ export function summarizeToolExecution(toolName: string, args: unknown, result: 
 				isError,
 				timestamp: Date.now(),
 			};
-	}
-}
-
-function buildRecentToolActivity(events: RunToolEvent[]): string {
-	if (events.length === 0) return "";
-	return events
-		.slice(-RECENT_TOOL_SUMMARY_COUNT)
-		.map((e) => `- ${e.summary}`)
-		.join("\n");
-}
-
-function buildExecutorSignals(events: RunToolEvent[]): ExecutorSignals {
-	const mutationsCount = events.filter((e) => e.toolName === "edit" || e.toolName === "write").length;
-	const verificationCommands = events
-		.filter((e) => e.toolName === "bash" && isVerificationCommand(e.command))
-		.map((e) => e.command!);
-	const recentFailures = events
-		.filter((e) => e.isError)
-		.slice(-3)
-		.map((e) => e.summary);
-	let phase: ExecutorSignals["phase"] = "exploring";
-	if (mutationsCount > 0 && verificationCommands.length > 0) {
-		phase = "verifying";
-	} else if (mutationsCount > 0) {
-		phase = "mutating";
-	} else if (recentFailures.length > 0) {
-		phase = "stuck";
-	}
-	return { phase, mutationsCount, verificationCommands, recentFailures };
-}
-
-function detectStage(events: RunToolEvent[], advisorCallsThisRun: number): { stage: AdvisorStage; reason: string } {
-	const hasMutation = events.some((e) => e.toolName === "edit" || e.toolName === "write");
-	const hasVerification = events.some((e) => e.toolName === "bash" && isVerificationCommand(e.command));
-	const recentFailure = [...events].reverse().find((e) => e.isError);
-	const explorationCount = events.filter((e) => e.toolName === "read" || e.toolName === "bash").length;
-	if (hasMutation && hasVerification) {
-		return { stage: "final-check", reason: "Implementation changes exist and verification output is already in the transcript." };
-	}
-	if (recentFailure) {
-		return { stage: "recovery", reason: `Recent failure signal: ${recentFailure.summary}` };
-	}
-	if (hasMutation && advisorCallsThisRun > 1) {
-		return { stage: "recovery", reason: "Implementation has started and the executor is checking course again before finishing." };
-	}
-	if (!hasMutation && explorationCount >= 2) {
-		return { stage: "initial", reason: "Exploratory reads or commands have happened, but the executor has not committed to file changes yet." };
-	}
-	if (hasMutation) {
-		return { stage: "recovery", reason: "Implementation is in progress, but there is not enough verification evidence yet for a final check." };
-	}
-	return { stage: "initial", reason: "The executor is still in the early orientation phase." };
-}
-
-export async function executeAdvisor(
-	ctx: ExtensionContext,
-	pi: ExtensionAPI,
-	signal: AbortSignal | undefined,
-	onUpdate: AgentToolUpdateCallback<AdvisorDetails> | undefined,
-	stageOverride?: AdvisorStage,
-): Promise<AgentToolResult<AdvisorDetails>> {
-	const config = loadAdvisorConfig();
-	const maxUsesPerRun = config.maxUsesPerRun ?? MAX_USES_PER_RUN_DEFAULT;
-	const maxContextMessages = config.maxContextMessages ?? MAX_CONTEXT_MESSAGES_DEFAULT;
-
-	if (usesThisRun >= maxUsesPerRun) {
-		return {
-			content: [{ type: "text", text: `Advisor usage limit reached (${maxUsesPerRun} per run). Continue without advisor guidance.` }],
-			details: { effort: getAdvisorEffort(), errorMessage: "max_uses_exceeded" },
-		};
-	}
-	usesThisRun++;
-
-	const advisor = getAdvisorModel();
-	if (!advisor) {
-		return buildErrorResult(undefined, ERR_NO_MODEL, ERR_NO_MODEL_SELECTED);
-	}
-	const advisorLabel = `${advisor.provider}:${advisor.id}`;
-	const effort = getAdvisorEffort();
-
-	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(advisor);
-	if (!auth.ok) {
-		return buildErrorResult(advisorLabel, errMisconfigured(advisorLabel, auth.error), auth.error);
-	}
-	if (!auth.apiKey) {
-		return buildErrorResult(advisorLabel, errNoApiKey(advisorLabel), errNoApiKeyDetail(advisor.provider));
-	}
-
-	const stageInfo = stageOverride
-		? { stage: stageOverride, reason: "Executor explicitly signaled this stage." }
-		: detectStage(runToolEvents, usesThisRun);
-	const recentToolActivity = buildRecentToolActivity(runToolEvents);
-	const signals = buildExecutorSignals(runToolEvents);
-	// Curated transcript: strips tool results + toolCall blocks, clamps long text,
-	// windows to first+last N messages. In-flight advisor call and user-tail
-	// normalization handled internally by buildAdvisorMessages.
-	const branch = ctx.sessionManager.getBranch();
-	const advisorMessages = buildAdvisorMessages(
-		branch as unknown as Parameters<typeof buildAdvisorMessages>[0],
-		stageInfo,
-		recentToolActivity,
-		maxContextMessages,
-		signals,
-	) as unknown as Message[];
-	if (advisorMessages.length === 0) {
-		return buildErrorResult(advisorLabel, "No conversation context available for advisor. Continue without advice.", "no_context");
-	}
-	const inventoryMessage = getInventoryMessage(pi.getAllTools());
-	const messages: Message[] = inventoryMessage ? [inventoryMessage, ...advisorMessages] : advisorMessages;
-
-	onUpdate?.({
-		content: [{ type: "text", text: msgConsulting(advisorLabel, effort) }],
-		details: { advisorModel: advisorLabel, effort },
-	});
-
-	try {
-		const runtimeComplete = getRuntimeCompleteSimple(ctx.modelRegistry);
-		const complete = runtimeComplete ?? await loadCompleteSimple();
-		const options = runtimeComplete
-			? { signal, reasoning: effort }
-			: { apiKey: auth.apiKey, headers: auth.headers, signal, reasoning: effort };
-		const response = await completeAdvisor(
-			advisor,
-			// `tools: []` reaffirms the "never calls tools" contract even when
-			// `messages` contains prior toolCall/toolResult blocks (btw.ts:235).
-			{ systemPrompt: ADVISOR_SYSTEM_PROMPT, messages, tools: [] },
-			options,
-			complete,
-		);
-
-		if (response.stopReason === "aborted") {
-			return {
-				content: [{ type: "text", text: ERR_CALL_ABORTED }],
-				details: {
-					advisorModel: advisorLabel,
-					effort,
-					usage: response.usage,
-					stopReason: response.stopReason,
-					errorMessage: response.errorMessage ?? ERR_ABORTED_DETAIL,
-				},
-			};
-		}
-
-		if (response.stopReason === "error") {
-			return {
-				content: [{ type: "text", text: errCallFailed(response.errorMessage) }],
-				details: {
-					advisorModel: advisorLabel,
-					effort,
-					usage: response.usage,
-					stopReason: response.stopReason,
-					errorMessage: response.errorMessage,
-				},
-			};
-		}
-
-		const advisorText = response.content
-			.filter((c): c is { type: "text"; text: string } => c.type === "text")
-			.map((c) => c.text)
-			.join("\n")
-			.trim();
-
-		if (!advisorText) {
-			return {
-				content: [{ type: "text", text: ERR_EMPTY_RESPONSE }],
-				details: {
-					advisorModel: advisorLabel,
-					effort,
-					usage: response.usage,
-					stopReason: response.stopReason,
-					errorMessage: ERR_EMPTY_RESPONSE_DETAIL,
-				},
-			};
-		}
-
-		return {
-			content: [{ type: "text", text: advisorText }],
-			details: {
-				advisorModel: advisorLabel,
-				effort,
-				usage: response.usage,
-				stopReason: response.stopReason,
-			},
-		};
-	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-		return buildErrorResult(advisorLabel, errCallThrew(message), message);
 	}
 }

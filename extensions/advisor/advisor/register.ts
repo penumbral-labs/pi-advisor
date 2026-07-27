@@ -1,8 +1,8 @@
-/** Advisor tool registration; execution remains in the temporary adapter. */
+/** Advisor tool registration. */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { executeAdvisor } from "../advisor.js";
+import { executeAdvisor } from "./execute.js";
 import { DEFAULT_PROMPT_GUIDELINES, DEFAULT_PROMPT_SNIPPET } from "../guidance.js";
 import { loadAdvisorConfig, validateGuidanceFields } from "./config.js";
 import { ADVISOR_TOOL_NAME, TOOL_LABEL } from "./messages.js";

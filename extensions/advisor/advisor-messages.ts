@@ -21,6 +21,8 @@ type AdvisorMessage = {
 type SessionEntryLike = {
 	type?: string;
 	message?: AdvisorMessage;
+	role?: string;
+	content?: MessageContent;
 	[key: string]: unknown;
 };
 
@@ -211,6 +213,17 @@ function buildSignalsBlock(signals: ExecutorSignals): string {
 - Recent failures: ${rf}`;
 }
 
+function isCanonicalSummary(message: AdvisorMessage): boolean {
+	if (message.role !== "user") return false;
+	const text = typeof message.content === "string"
+		? message.content
+		: Array.isArray(message.content)
+			? message.content.filter((block) => block?.type === "text").map((block) => block.text).join("\n")
+			: "";
+	return text.includes("The conversation history before this point was compacted into the following summary:") ||
+		text.includes("The following is a summary of a branch that this conversation came back from:");
+}
+
 function ensureAdvisorRequestClosure(messages: AdvisorMessage[]): AdvisorMessage[] {
 	if (messages.length === 0) return messages;
 	const last = messages[messages.length - 1];
@@ -235,9 +248,8 @@ export function buildAdvisorMessages(
 	const transcript: AdvisorMessage[] = [];
 
 	for (const entry of branch) {
-		if (entry.type !== "message" || !("message" in entry)) continue;
-		const msg = entry.message;
-		if (!msg || !("role" in msg)) continue;
+		const msg = entry.type === "message" ? entry.message : entry as AdvisorMessage;
+		if (!msg || typeof msg.role !== "string") continue;
 
 		if (msg.role === "user") {
 			transcript.push({ ...msg, content: summarizeUserContent(msg.content) });
@@ -274,13 +286,17 @@ export function buildAdvisorMessages(
 	}
 
 	const keepFirst = 2;
-	const keepLast = maxMessages - keepFirst - 1;
-	const omitted = transcript.length - keepFirst - keepLast;
+	const keepLast = Math.max(1, maxMessages - keepFirst - 1);
+	const first = transcript.slice(0, keepFirst);
+	const last = transcript.slice(-keepLast);
+	const retained = new Set([...first, ...last]);
+	const summaries = transcript.filter((message) => isCanonicalSummary(message) && !retained.has(message));
+	const omitted = transcript.length - retained.size - summaries.length;
 	const omittedMessage: AdvisorMessage = {
 		role: "user",
 		content: `[${omitted} earlier transcript messages omitted. Focus on the retained task framing and the most recent evidence.]`,
 		timestamp: Date.now(),
 	};
 
-	return ensureAdvisorRequestClosure([contextMessage, ...transcript.slice(0, keepFirst), omittedMessage, ...transcript.slice(-keepLast)]);
+	return ensureAdvisorRequestClosure([contextMessage, ...first, ...summaries, omittedMessage, ...last]);
 }

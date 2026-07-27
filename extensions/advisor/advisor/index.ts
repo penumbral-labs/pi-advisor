@@ -3,6 +3,15 @@
 export { registerAdvisorCommand } from "./command.js";
 export { loadAdvisorConfig, modelStubOf, parseModelStub, resolveAdvisorEntry, saveAdvisorConfig } from "./config.js";
 export { ensureUserTailForAdvisor, stripInflightAdvisorCall } from "./context.js";
+export { curateAdvisorMessages } from "./curation.js";
+export {
+	buildExecutorContext,
+	detectAdvisorStage,
+	getRunToolEvents,
+	pushRunToolEvent,
+	resetRunToolEvents,
+} from "./execution-context.js";
+export { executeAdvisor, getAdvisorUsesThisRun, MAX_USES_PER_RUN_DEFAULT, resetAdvisorUsage } from "./execute.js";
 export { reconcileAdvisorTool, registerAdvisorBeforeAgentStart, registerModelSelectHandler } from "./handlers.js";
 export { getInventoryMessage, stableStringify } from "./inventory.js";
 export { ADVISOR_TOOL_NAME } from "./messages.js";
