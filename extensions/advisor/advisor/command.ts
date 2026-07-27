@@ -4,7 +4,6 @@ import { getSupportedThinkingLevels, type ThinkingLevel } from "@earendil-works/
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { SelectItem } from "@earendil-works/pi-tui";
 import { showAdvisorPicker, showEffortPicker, showMappingsPicker, showNudgePicker } from "../advisor-ui.js";
-import { DEFAULT_NUDGE_CONFIG, type NudgeConfig } from "../advisor-messages.js";
 import {
 	loadAdvisorConfig, modelStubOf, parseModelStub, saveAdvisorConfig, type AdvisorEntry,
 } from "./config.js";
@@ -15,25 +14,11 @@ import {
 	RECOMMENDED_EFFORT_SUFFIX, XHIGH_EFFORT_LEVEL,
 } from "./messages.js";
 import { reconcileAdvisorTool } from "./handlers.js";
+import { detectNudgePreset, NUDGE_PRESETS, type NudgePreset } from "./nudges.js";
 import { applyAdvisorForExecutor } from "./restore.js";
 import { setActiveExecutorKey, setAdvisorEffort, setAdvisorModel } from "./state.js";
 
-type NudgePreset = "heavy" | "light" | "off";
-const NUDGE_PRESETS: Record<NudgePreset, NudgeConfig> = {
-	heavy: { preExecution: true, mutationBurst: 2, longRunToolCalls: 8, backoffToolCalls: 10 },
-	light: { preExecution: false, mutationBurst: 8, longRunToolCalls: 30, backoffToolCalls: 40 },
-	off: { disabled: true },
-};
-
-function detectNudgePreset(nudge: NudgeConfig | undefined): NudgePreset | "default" {
-	if (!nudge) return "default";
-	if (nudge.disabled) return "off";
-	if ((nudge.mutationBurst ?? DEFAULT_NUDGE_CONFIG.mutationBurst) <= 3) return "heavy";
-	if ((nudge.mutationBurst ?? DEFAULT_NUDGE_CONFIG.mutationBurst) >= 6) return "light";
-	return "default";
-}
-
-function nudgeLabel(nudge: NudgeConfig | undefined): string {
+function nudgeLabel(nudge: AdvisorEntry["nudge"]): string {
 	const preset = detectNudgePreset(nudge);
 	return preset === "default" ? "" : `  [nudge:${preset}]`;
 }
@@ -106,7 +91,8 @@ export function registerAdvisorCommand(pi: ExtensionAPI): void {
 			];
 			const selectedNudge = await showNudgePicker(ctx, nudgeItems, nudgeValues.indexOf(preset === "default" ? NUDGE_DEFAULT_VALUE : preset));
 			if (!selectedNudge) return;
-			const nudge = selectedNudge === NUDGE_DEFAULT_VALUE ? undefined : NUDGE_PRESETS[selectedNudge as NudgePreset];
+			const presetChoice: NudgePreset = selectedNudge === NUDGE_DEFAULT_VALUE ? "default" : selectedNudge as NudgePreset;
+			const nudge = NUDGE_PRESETS[presetChoice];
 			const pickedStub = modelStubOf(picked)!;
 			if (!saveAdvisorConfig(pickedStub, effort, executorStub, nudge)) { ctx.ui.notify(MSG_CONFIG_SAVE_FAILED, "error"); return; }
 			if (affectsActive) {

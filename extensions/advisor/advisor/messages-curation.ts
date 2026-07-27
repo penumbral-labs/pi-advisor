@@ -9,6 +9,8 @@
  * that frames the advisory request with stage/signal metadata.
  */
 
+import type { ExecutorSignals } from "./execution-context.js";
+
 type MessageContent = string | Array<{ type?: string; text?: string; [key: string]: unknown }> | unknown;
 
 type AdvisorMessage = {
@@ -65,138 +67,12 @@ export function summarizeAssistantContent(content: Array<{ type?: string; text?:
 		.map((block) => ({ ...block, text: clampText(block.text) }));
 }
 
-export type ExecutorSignals = {
-	phase: "exploring" | "mutating" | "verifying" | "stuck";
-	mutationsCount: number;
-	verificationCommands: string[];
-	recentFailures: string[];
-};
-
 function buildContextPolicy(): string {
 	return `Context policy:
 - Assistant tool calls are stripped from the transcript below.
 - Tool results are not replayed.
 - User task framing is retained where possible.
 - If truncated: earliest messages omitted, focus on recent evidence.`;
-}
-
-export function isVerificationCommand(command?: string): boolean {
-	if (!command) return false;
-	return /\b(test|tests|jest|vitest|pytest|rspec|cargo test|go test|npm run test|npm test|pnpm test|pnpm run test|yarn test|check|lint|typecheck|tsc|build)\b/i.test(command);
-}
-
-// ---------------------------------------------------------------------------
-// Nudge config — thresholds for the three automatic advisory triggers.
-// Backoff (min tool calls between nudges) lives here too but is enforced by
-// the session-level counter in index.ts, not inside shouldNudge itself.
-// ---------------------------------------------------------------------------
-
-export interface NudgeConfig {
-	/** Disable all nudges for this executor. Useful for strong models that need less hand-holding. Default: false */
-	disabled?: boolean;
-	/** Enable the pre-execution trigger (first mutation after enough exploration). Set false to keep the burst/long-run nets but drop the noisy "you started writing" nudge. Default: true */
-	preExecution?: boolean;
-	/** Minimum exploration calls (read/bash) before first mutation to fire pre-execution nudge. Default: 3 */
-	preExecutionMinExploration?: number;
-	/** Mutation count at which the burst trigger fires. Default: 4 */
-	mutationBurst?: number;
-	/** Total tool-call count at which the long-run trigger fires. Default: 15 */
-	longRunToolCalls?: number;
-	/** Minimum session-level tool calls between nudges. Default: 20 */
-	backoffToolCalls?: number;
-}
-
-export const DEFAULT_NUDGE_CONFIG = {
-	disabled: false,
-	preExecution: true,
-	preExecutionMinExploration: 3,
-	mutationBurst: 4,
-	longRunToolCalls: 15,
-	backoffToolCalls: 20,
-} satisfies Required<NudgeConfig>;
-
-/**
- * Returns a nudge hint string when a trigger fires, or null when the agent
- * doesn't need prompting. Three triggers in priority order:
- *
- * 1. Pre-execution — first mutation after ≥N exploration calls. Fires right as
- *    the agent transitions from "figuring it out" to "writing it".
- * 2. Mutation burst — fires exactly at the Nth mutation. Catches agents that
- *    dive straight into writing without exploration.
- * 3. Long run — fires exactly at the Nth total tool call. Catches long
- *    exploration-heavy or multi-step sessions that never triggered 1 or 2.
- *
- * Caller is responsible for session-level backoff (don't call when within the
- * backoff window) and deduplication (don't call when advisor was already
- * consulted this run).
- */
-export function shouldNudge(
-	events: { toolName: string; command?: string }[],
-	advisorCallsThisRun: number,
-	advisorEnabled: boolean,
-	maxUsesPerRun: number,
-	cfg: NudgeConfig = DEFAULT_NUDGE_CONFIG,
-): string | null {
-	if (!advisorEnabled) return null;
-	if (cfg.disabled) return null;
-	if (advisorCallsThisRun >= maxUsesPerRun) return null;
-	if (advisorCallsThisRun > 0) return null; // already consulted this run
-
-	const preExecutionEnabled = cfg.preExecution ?? DEFAULT_NUDGE_CONFIG.preExecution;
-	const preExploration = cfg.preExecutionMinExploration ?? DEFAULT_NUDGE_CONFIG.preExecutionMinExploration;
-	const burstThreshold = cfg.mutationBurst ?? DEFAULT_NUDGE_CONFIG.mutationBurst;
-	const longRunThreshold = cfg.longRunToolCalls ?? DEFAULT_NUDGE_CONFIG.longRunToolCalls;
-
-	const mutationCount = events.filter((e) => e.toolName === "edit" || e.toolName === "write").length;
-	const totalCalls = events.length;
-
-	// Trigger 1: Pre-execution — fires on the exact first mutation after enough exploration.
-	if (preExecutionEnabled && mutationCount === 1) {
-		const firstMutationIdx = events.findIndex((e) => e.toolName === "edit" || e.toolName === "write");
-		const explorationBefore = events
-			.slice(0, firstMutationIdx)
-			.filter((e) => e.toolName === "read" || e.toolName === "bash").length;
-		if (explorationBefore >= preExploration) {
-			return `You've started writing after ${explorationBefore} exploratory tool calls. If independent judgment could materially change the approach, consider \`advisor({stage: 'initial'})\` before going further.`;
-		}
-	}
-
-	// Trigger 2: Mutation burst — fires exactly at the threshold count.
-	if (mutationCount === burstThreshold) {
-		return `You've made ${mutationCount} code changes. If independent judgment could materially change the approach, consider \`advisor()\`.`;
-	}
-
-	// Trigger 3: Long run — fires exactly at the threshold count.
-	if (totalCalls === longRunThreshold) {
-		return `${totalCalls} tool calls into this run. If independent judgment could materially change the approach, consider \`advisor()\`.`;
-	}
-
-	return null;
-}
-
-/**
- * True when `cwd` falls under any configured quiet path, where automatic
- * nudges are silenced (e.g. a home-base / non-coding vault). Quiet paths are
- * directory prefixes; a trailing `/**` or `/` is optional and ignored, and a
- * leading `~` is expanded against `homeDir`. Matching is segment-aware, so
- * `~/work-os` matches `~/work-os` and `~/work-os/wiki` but not `~/work-os-2`.
- * Pure (no filesystem access) so it is unit-testable.
- */
-export function cwdMatchesQuietPath(cwd: string, quietPaths: string[] | undefined, homeDir: string): boolean {
-	if (!quietPaths || quietPaths.length === 0) return false;
-	const expandHome = (p: string): string => {
-		if (p === "~") return homeDir;
-		if (p.startsWith("~/")) return `${homeDir}/${p.slice(2)}`;
-		return p;
-	};
-	const stripTrailing = (p: string): string => p.replace(/\/+\*\*$/, "").replace(/\/+$/, "");
-	const target = stripTrailing(cwd.trim());
-	for (const raw of quietPaths) {
-		const base = stripTrailing(expandHome(raw.trim()));
-		if (!base) continue;
-		if (target === base || target.startsWith(`${base}/`)) return true;
-	}
-	return false;
 }
 
 function buildSignalsBlock(signals: ExecutorSignals): string {

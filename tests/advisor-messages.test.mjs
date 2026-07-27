@@ -6,7 +6,8 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildAdvisorMessages, cwdMatchesQuietPath, shouldNudge } from "../extensions/advisor/advisor-messages.ts";
+import { buildAdvisorMessages } from "../extensions/advisor/advisor/messages-curation.ts";
+import { cwdMatchesQuietPath, shouldNudge } from "../extensions/advisor/advisor/nudges.ts";
 
 // ---------------------------------------------------------------------------
 // buildAdvisorMessages

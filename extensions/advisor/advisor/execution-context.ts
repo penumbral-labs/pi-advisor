@@ -1,8 +1,18 @@
 /** Stage inference and compact executor activity for advisor requests. */
 
-import { isVerificationCommand, type ExecutorSignals } from "../advisor-messages.js";
-
 export type AdvisorStage = "initial" | "recovery" | "final-check";
+
+export type ExecutorSignals = {
+	phase: "exploring" | "mutating" | "verifying" | "stuck";
+	mutationsCount: number;
+	verificationCommands: string[];
+	recentFailures: string[];
+};
+
+export function isVerificationCommand(command?: string): boolean {
+	if (!command) return false;
+	return /\b(test|tests|jest|vitest|pytest|rspec|cargo test|go test|npm run test|npm test|pnpm test|pnpm run test|yarn test|check|lint|typecheck|tsc|build)\b/i.test(command);
+}
 
 export interface RunToolEvent {
 	toolName: string;

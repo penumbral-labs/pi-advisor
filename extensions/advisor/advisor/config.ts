@@ -9,7 +9,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-ai";
-import type { NudgeConfig } from "../advisor-messages.js";
+import type { NudgeConfig } from "./nudges.js";
 
 export const ADVISOR_CONFIG_PATH = join(homedir(), ".pi", "agent", "pi-advisor.json");
 let advisorConfigPath = ADVISOR_CONFIG_PATH;

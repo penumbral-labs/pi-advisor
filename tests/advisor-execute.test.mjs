@@ -6,8 +6,8 @@ import test, { afterEach, beforeEach } from "node:test";
 
 import { __setAdvisorConfigPathForTests } from "../extensions/advisor/advisor/config.ts";
 import { executeAdvisor, resetAdvisorUsage } from "../extensions/advisor/advisor/execute.ts";
+import { resetNudgeRunState } from "../extensions/advisor/advisor/nudges.ts";
 import { setAdvisorEffort, setAdvisorModel } from "../extensions/advisor/advisor/state.ts";
-import { resetRunState } from "../extensions/advisor/advisor.ts";
 
 const tempDirs = [];
 let configPath;
@@ -49,7 +49,7 @@ beforeEach(() => {
 	setAdvisorModel({ provider: "litellm", id: "claude-opus-4-8" });
 	setAdvisorEffort("high");
 	resetAdvisorUsage();
-	resetRunState();
+	resetNudgeRunState();
 	delete globalThis.__piAdvisorCompatCompleteSimple;
 	delete globalThis.__piCodingAgentBuildSessionContext;
 });
