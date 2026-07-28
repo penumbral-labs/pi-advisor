@@ -45,6 +45,9 @@ export const msgAdvisorSwapped = (label: string, effort: ThinkingLevel | undefin
 	`Advisor swapped to ${label}${effort ? `, ${effort}` : ""} (executor: ${executorKey})`;
 export const msgSavedForExecutor = (executorStub: string, advisorStub: string, effort: ThinkingLevel | undefined) =>
 	`Saved for ${executorStub}: ${advisorStub}${effort ? ` / ${effort}` : ""}`;
+export const msgSavedForDefault = (advisorStub: string, effort: ThinkingLevel | undefined) =>
+	`Saved default advisor: ${advisorStub}${effort ? ` / ${effort}` : ""}`;
 export const msgClearedForExecutor = (executorStub: string) => `Advisor cleared for ${executorStub}`;
+export const MSG_DEFAULT_CLEARED = "Default advisor cleared";
 export const msgConsulting = (label: string, effort: ThinkingLevel | undefined) =>
 	`Consulting advisor (${label}${effort ? `, ${effort}` : ""})…`;

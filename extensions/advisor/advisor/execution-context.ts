@@ -44,28 +44,34 @@ function buildRecentToolActivity(events: RunToolEvent[]): string {
 		.join("\n");
 }
 
+function findLatestVerification(events: RunToolEvent[]): RunToolEvent | undefined {
+	return [...events].reverse().find((event) => event.toolName === "bash" && isVerificationCommand(event.command));
+}
+
 function buildExecutorSignals(events: RunToolEvent[]): ExecutorSignals {
 	const mutationsCount = events.filter((event) => event.toolName === "edit" || event.toolName === "write").length;
 	const verificationCommands = events
 		.filter((event) => event.toolName === "bash" && isVerificationCommand(event.command))
 		.map((event) => event.command!);
+	const latestVerification = findLatestVerification(events);
 	const recentFailures = events
 		.filter((event) => event.isError)
 		.slice(-3)
 		.map((event) => event.summary);
 	let phase: ExecutorSignals["phase"] = "exploring";
-	if (mutationsCount > 0 && verificationCommands.length > 0) phase = "verifying";
+	if (latestVerification?.isError || (!latestVerification && recentFailures.length > 0)) phase = "stuck";
+	else if (mutationsCount > 0 && latestVerification) phase = "verifying";
 	else if (mutationsCount > 0) phase = "mutating";
-	else if (recentFailures.length > 0) phase = "stuck";
 	return { phase, mutationsCount, verificationCommands, recentFailures };
 }
 
 export function detectAdvisorStage(events: RunToolEvent[], advisorCallsThisRun: number): { stage: AdvisorStage; reason: string } {
 	const hasMutation = events.some((event) => event.toolName === "edit" || event.toolName === "write");
-	const hasVerification = events.some((event) => event.toolName === "bash" && isVerificationCommand(event.command));
+	const latestVerification = findLatestVerification(events);
 	const recentFailure = [...events].reverse().find((event) => event.isError);
 	const explorationCount = events.filter((event) => event.toolName === "read" || event.toolName === "bash").length;
-	if (hasMutation && hasVerification) {
+	if (latestVerification?.isError) return { stage: "recovery", reason: `Failed verification signal: ${latestVerification.summary}` };
+	if (hasMutation && latestVerification) {
 		return { stage: "final-check", reason: "Implementation changes exist and verification output is already in the transcript." };
 	}
 	if (recentFailure) return { stage: "recovery", reason: `Recent failure signal: ${recentFailure.summary}` };

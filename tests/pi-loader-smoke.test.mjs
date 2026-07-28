@@ -4,8 +4,9 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
-const extensionPath = new URL("../extensions/advisor/index.ts", import.meta.url).pathname;
+const extensionPath = fileURLToPath(new URL("../extensions/advisor/index.ts", import.meta.url));
 
 function writeSmokeExtension(path) {
 	writeFileSync(path, `

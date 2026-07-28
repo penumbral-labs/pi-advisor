@@ -97,8 +97,6 @@ export async function executeAdvisor(
 			"max_uses_exceeded",
 		);
 	}
-	usesThisRun++;
-
 	const advisor = getAdvisorModel();
 	if (!advisor) return buildErrorResult(undefined, effort, ERR_NO_MODEL, ERR_NO_MODEL_SELECTED);
 	const advisorLabel = `${advisor.provider}:${advisor.id}`;
@@ -114,7 +112,7 @@ export async function executeAdvisor(
 		ctx.sessionManager.getLeafId(),
 	);
 	const canonicalMessages = stripInflightAdvisorCall(convertToLlm(sessionMessages));
-	const executionContext = buildExecutorContext(getRunToolEvents(), usesThisRun, stageOverride);
+	const executionContext = buildExecutorContext(getRunToolEvents(), usesThisRun + 1, stageOverride);
 	const curatedMessages = curateAdvisorMessages(
 		canonicalMessages,
 		executionContext.stageInfo,
@@ -134,17 +132,17 @@ export async function executeAdvisor(
 	const inventoryMessage = getInventoryMessage(pi.getAllTools());
 	const messages: Message[] = inventoryMessage ? [inventoryMessage, ...branchMessages] : branchMessages;
 
-	onUpdate?.({
-		content: [{ type: "text", text: msgConsulting(advisorLabel, effort) }],
-		details: { advisorModel: advisorLabel, effort },
-	});
-
 	try {
 		const runtimeComplete = getRuntimeCompleteSimple(ctx.modelRegistry);
 		const complete = runtimeComplete ?? await loadCompleteSimple();
 		const options = runtimeComplete
 			? { signal, reasoning: effort }
 			: { apiKey: auth.apiKey, headers: auth.headers, signal, reasoning: effort };
+		usesThisRun++;
+		onUpdate?.({
+			content: [{ type: "text", text: msgConsulting(advisorLabel, effort) }],
+			details: { advisorModel: advisorLabel, effort },
+		});
 		const response = await completeAdvisor(
 			advisor,
 			{ systemPrompt: ADVISOR_SYSTEM_PROMPT, messages, tools: [] },

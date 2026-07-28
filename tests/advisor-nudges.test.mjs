@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after, afterEach } from "node:test";
 
-import { __setAdvisorConfigPathForTests, loadAdvisorConfig } from "../extensions/advisor/advisor/config.ts";
+import { __setAdvisorConfigPathForTests, loadAdvisorConfig, saveAdvisorConfig } from "../extensions/advisor/advisor/config.ts";
 import { registerAdvisorCommand } from "../extensions/advisor/advisor/command.ts";
 import {
 	DEFAULT_NUDGE_CONFIG,
@@ -95,6 +95,64 @@ test("event wiring sends one follow-up nudge and session backoff survives a new 
 	await h.events.get("agent_start")({}, h.ctx);
 	await executeTool(h, "edit", "5", { path: "c.ts" });
 	assert.equal(h.messages.length, 2);
+});
+
+test("nudge config is cached across tool calls and refreshed after saveAdvisorConfig", async () => {
+	writeFileSync(testConfigPath, JSON.stringify({
+		default: { modelStub: "anthropic:opus" },
+		nudge: { preExecution: false, mutationBurst: 99, longRunToolCalls: 99 },
+	}));
+	setAdvisorModel({ provider: "anthropic", id: "opus", name: "Opus" });
+	const h = harness();
+	registerAdvisorNudges(h.pi);
+	await h.events.get("agent_start")({}, h.ctx);
+	await executeTool(h, "edit", "1", { path: "a.ts" });
+	writeFileSync(testConfigPath, JSON.stringify({
+		default: { modelStub: "anthropic:opus" },
+		nudge: { preExecution: false, mutationBurst: 2, longRunToolCalls: 99 },
+	}));
+	await executeTool(h, "edit", "2", { path: "b.ts" });
+	assert.equal(h.messages.length, 0, "unchanged cache should avoid reloading config for every tool call");
+	assert.equal(saveAdvisorConfig("anthropic:opus", undefined, undefined, { preExecution: false, mutationBurst: 3, longRunToolCalls: 99 }), true);
+	await executeTool(h, "edit", "3", { path: "c.ts" });
+	assert.equal(h.messages.length, 1, "successful config saves must invalidate the nudge cache");
+});
+
+test("inactive default mapping uses default-specific save and clear notifications", async () => {
+	const models = [
+		{ provider: "openai", id: "gpt-5", name: "GPT 5", reasoning: false },
+		{ provider: "anthropic", id: "opus", name: "Opus", reasoning: false },
+		{ provider: "anthropic", id: "sonnet", name: "Sonnet", reasoning: false },
+	];
+	for (const [choices, expected] of [
+		[["__default__", "anthropic:sonnet", "heavy"], /Saved default advisor: anthropic:sonnet/],
+		[["__default__", "__no_advisor__"], /Default advisor cleared/],
+	]) {
+		writeFileSync(testConfigPath, JSON.stringify({
+			default: { modelStub: "anthropic:opus" },
+			byExecutor: { "openai:gpt-5": { modelStub: "anthropic:opus" } },
+		}));
+		let command;
+		const notifications = [];
+		const pi = {
+			getActiveTools: () => [],
+			registerCommand: (_name, registration) => { command = registration; },
+			setActiveTools: () => {},
+		};
+		registerAdvisorCommand(pi);
+		const pendingChoices = [...choices];
+		await command.handler("", {
+			hasUI: true,
+			model: models[0],
+			modelRegistry: { getAvailable: () => models },
+			ui: {
+				custom: async () => pendingChoices.shift(),
+				notify: (message) => notifications.push(message),
+			},
+		});
+		assert.match(notifications.at(-1), expected);
+		assert.doesNotMatch(notifications.at(-1), /undefined/);
+	}
 });
 
 test("UI preset selection persists on the chosen executor mapping", async () => {

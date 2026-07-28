@@ -18,7 +18,7 @@ If the upstream package is installed, remove it first so only one extension regi
 pi remove npm:@juicesharp/rpiv-advisor
 ```
 
-The package requires Node.js 20.6 or newer and uses the Pi runtime's installed peer dependencies.
+The package requires Node.js 22.6 or newer and uses the Pi runtime's installed peer dependencies.
 
 ## Configure per-executor pairings
 

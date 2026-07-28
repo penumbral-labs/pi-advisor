@@ -23,7 +23,7 @@
 		"url": "https://github.com/penumbral-labs/pi-advisor/issues"
 	},
 	"engines": {
-		"node": ">=20.6.0"
+		"node": ">=22.6.0"
 	},
 	"files": [
 		"extensions",

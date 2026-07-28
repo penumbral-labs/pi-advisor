@@ -2,7 +2,7 @@
 
 import { homedir } from "node:os";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { loadAdvisorConfig, resolveAdvisorEntry, type AdvisorConfig } from "./config.js";
+import { loadAdvisorConfig, onAdvisorConfigSaved, resolveAdvisorEntry, type AdvisorConfig } from "./config.js";
 import { getRunToolEvents, pushRunToolEvent, resetRunToolEvents, type RunToolEvent } from "./execution-context.js";
 import { getAdvisorUsesThisRun, MAX_USES_PER_RUN_DEFAULT, resetAdvisorUsage } from "./execute.js";
 import { ADVISOR_TOOL_NAME } from "./messages.js";
@@ -143,6 +143,9 @@ export function summarizeToolExecution(toolName: string, args: unknown, result: 
 
 export function registerAdvisorNudges(pi: ExtensionAPI): void {
 	const toolArgsById = new Map<string, unknown>();
+	let cachedConfig: AdvisorConfig | undefined;
+	onAdvisorConfigSaved(() => { cachedConfig = undefined; });
+	const configForNudges = (): AdvisorConfig => cachedConfig ??= loadAdvisorConfig();
 	pi.on("agent_start", async (_event, ctx) => {
 		resetNudgeRunState();
 		toolArgsById.clear();
@@ -156,7 +159,7 @@ export function registerAdvisorNudges(pi: ExtensionAPI): void {
 		pushRunToolEvent(summarizeToolExecution(event.toolName, args, event.result, event.isError));
 		const runtime = state();
 		runtime.sessionToolCallCount++;
-		const config = loadAdvisorConfig();
+		const config = configForNudges();
 		if (cwdMatchesQuietPath(ctx.cwd, config.quietPaths, homedir())) return;
 		const nudge = resolveNudgeConfig(config, getActiveExecutorKey());
 		if (runtime.sessionLastNudgeAtCount !== undefined && runtime.sessionToolCallCount - runtime.sessionLastNudgeAtCount < nudge.backoffToolCalls) return;

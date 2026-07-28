@@ -89,6 +89,7 @@ test("closure: truncated path ending with assistant → closure appended", () =>
 	}
 
 	const messages = buildAdvisorMessages(branch, stageInfo, "", 6);
+	assert.equal(messages.length, 6);
 	const last = messages[messages.length - 1];
 	assert.equal(last.role, "user");
 	assert.match(String(last.content), /Provide your advisory assessment/);
@@ -163,6 +164,21 @@ test("curates canonical messages while preserving compaction and branch summarie
 	assert.doesNotMatch(serialized, /toolCall/);
 });
 
+test("maxMessages is a hard limit with no duplicated transcript messages", () => {
+	const branch = Array.from({ length: 8 }, (_, index) => ({
+		role: "user",
+		content: `unique message ${index}`,
+		timestamp: index,
+	}));
+	const messages = buildAdvisorMessages(branch, { stage: "initial", reason: "test" }, "", 4);
+	assert.equal(messages.length, 4);
+	const serialized = JSON.stringify(messages);
+	for (let index = 0; index < branch.length; index++) {
+		const matches = serialized.match(new RegExp(`unique message ${index}`, "g")) ?? [];
+		assert.ok(matches.length <= 1, `message ${index} must not be duplicated`);
+	}
+});
+
 test("canonical summaries survive when they fall outside the bounded first and last windows", () => {
 	const canonical = Array.from({ length: 12 }, (_, index) => ({
 		role: "user",
@@ -176,6 +192,7 @@ test("canonical summaries survive when they fall outside the bounded first and l
 	};
 
 	const messages = buildAdvisorMessages(canonical, { stage: "initial", reason: "test" }, "", 6);
+	assert.equal(messages.length, 6);
 	assert.match(JSON.stringify(messages), /MIDDLE BRANCH SUMMARY/);
 	assert.match(JSON.stringify(messages), /earlier transcript messages omitted/);
 });
@@ -188,10 +205,36 @@ test("stage inference and explicit overrides describe the executor state", async
 		{ toolName: "bash", summary: "$ npm test", command: "npm test", isError: false, timestamp: 3 },
 	];
 	assert.equal(detectAdvisorStage(events, 1).stage, "final-check");
+	const failedVerification = [
+		{ toolName: "edit", summary: "edit a", isError: false, timestamp: 1 },
+		{ toolName: "bash", summary: "$ npm test (exit 1)", command: "npm test", isError: true, timestamp: 2 },
+	];
+	assert.equal(detectAdvisorStage(failedVerification, 1).stage, "recovery");
+	assert.equal(buildExecutorContext(failedVerification, 1).signals.phase, "stuck");
 	assert.equal(detectAdvisorStage([{ toolName: "bash", summary: "$ test", isError: true, timestamp: 1 }], 1).stage, "recovery");
 	assert.equal(detectAdvisorStage([{ toolName: "read", summary: "read a", isError: false, timestamp: 1 }], 1).stage, "initial");
 	assert.equal(buildExecutorContext(events, 1, "recovery").stageInfo.stage, "recovery");
 	assert.match(buildExecutorContext(events, 1, "recovery").stageInfo.reason, /explicitly signaled/);
+});
+
+test("latest successful verification recovers from earlier failures", async () => {
+	const { buildExecutorContext } = await import("../extensions/advisor/advisor/execution-context.ts");
+	for (const events of [
+		[
+			{ toolName: "bash", summary: "$ transient command (exit 1)", command: "printf transient", isError: true, timestamp: 1 },
+			{ toolName: "edit", summary: "edit a", isError: false, timestamp: 2 },
+			{ toolName: "bash", summary: "$ npm test", command: "npm test", isError: false, timestamp: 3 },
+		],
+		[
+			{ toolName: "edit", summary: "edit a", isError: false, timestamp: 1 },
+			{ toolName: "bash", summary: "$ npm test (exit 1)", command: "npm test", isError: true, timestamp: 2 },
+			{ toolName: "bash", summary: "$ npm test", command: "npm test", isError: false, timestamp: 3 },
+		],
+	]) {
+		const context = buildExecutorContext(events, 1);
+		assert.equal(context.stageInfo.stage, "final-check");
+		assert.equal(context.signals.phase, "verifying");
+	}
 });
 
 // ---------------------------------------------------------------------------

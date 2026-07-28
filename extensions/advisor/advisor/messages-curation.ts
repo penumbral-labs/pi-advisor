@@ -100,18 +100,12 @@ function isCanonicalSummary(message: AdvisorMessage): boolean {
 		text.includes("The following is a summary of a branch that this conversation came back from:");
 }
 
-function ensureAdvisorRequestClosure(messages: AdvisorMessage[]): AdvisorMessage[] {
-	if (messages.length === 0) return messages;
-	const last = messages[messages.length - 1];
-	if (last.role === "user") return messages;
-	return [
-		...messages,
-		{
-			role: "user",
-			content: "Provide your advisory assessment now based on the context above.",
-			timestamp: Date.now(),
-		},
-	];
+function advisorRequestClosure(): AdvisorMessage {
+	return {
+		role: "user",
+		content: "Provide your advisory assessment now based on the context above.",
+		timestamp: Date.now(),
+	};
 }
 
 export function buildAdvisorMessages(
@@ -143,8 +137,9 @@ export function buildAdvisorMessages(
 		}
 	}
 
-	if (transcript.length === 0) return [];
+	if (transcript.length === 0 || maxMessages <= 0) return [];
 
+	const limit = Math.floor(maxMessages);
 	const contextBlocks: string[] = [buildContextPolicy()];
 	contextBlocks.push(`Current advisory stage: ${stageInfo.stage}`);
 	contextBlocks.push(`Why this stage: ${stageInfo.reason}`);
@@ -157,22 +152,36 @@ export function buildAdvisorMessages(
 		timestamp: Date.now(),
 	};
 
-	if (transcript.length <= maxMessages) {
-		return ensureAdvisorRequestClosure([contextMessage, ...transcript]);
-	}
+	const needsClosure = transcript.at(-1)?.role !== "user";
+	const full = [contextMessage, ...transcript, ...(needsClosure ? [advisorRequestClosure()] : [])];
+	if (full.length <= limit) return full;
+	if (limit === 1) return [contextMessage];
 
-	const keepFirst = 2;
-	const keepLast = Math.max(1, maxMessages - keepFirst - 1);
-	const first = transcript.slice(0, keepFirst);
-	const last = transcript.slice(-keepLast);
-	const retained = new Set([...first, ...last]);
-	const summaries = transcript.filter((message) => isCanonicalSummary(message) && !retained.has(message));
-	const omitted = transcript.length - retained.size - summaries.length;
+	const summaryIndexes = transcript
+		.map((message, index) => isCanonicalSummary(message) ? index : -1)
+		.filter((index) => index >= 0);
+	let transcriptBudget = limit - 2; // context + omission marker
+	const includeClosure = needsClosure && transcriptBudget > 0;
+	if (includeClosure) transcriptBudget--;
+	const leadTarget = transcriptBudget >= 3 ? 2 : 0;
+	const summaryTarget = Math.min(summaryIndexes.length, Math.max(0, transcriptBudget - leadTarget - 1));
+	const tailCount = transcriptBudget > 0 ? Math.max(1, transcriptBudget - leadTarget - summaryTarget) : 0;
+	const tailStart = transcript.length - tailCount;
+	const selected = new Set<number>();
+	for (let index = tailStart; index < transcript.length; index++) selected.add(index);
+	for (const index of summaryIndexes) {
+		if (selected.size >= transcriptBudget) break;
+		selected.add(index);
+	}
+	for (let index = 0; index < transcript.length && selected.size < transcriptBudget && index < 2; index++) selected.add(index);
+	for (let index = tailStart - 1; index >= 0 && selected.size < transcriptBudget; index--) selected.add(index);
+
+	const retained = [...selected].sort((left, right) => left - right).map((index) => transcript[index]);
+	const omitted = transcript.length - retained.length;
 	const omittedMessage: AdvisorMessage = {
 		role: "user",
 		content: `[${omitted} earlier transcript messages omitted. Focus on the retained task framing and the most recent evidence.]`,
 		timestamp: Date.now(),
 	};
-
-	return ensureAdvisorRequestClosure([contextMessage, ...first, ...summaries, omittedMessage, ...last]);
+	return [contextMessage, ...retained, omittedMessage, ...(includeClosure ? [advisorRequestClosure()] : [])];
 }

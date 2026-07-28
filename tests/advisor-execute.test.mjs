@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test, { afterEach, beforeEach } from "node:test";
 
 import { __setAdvisorConfigPathForTests } from "../extensions/advisor/advisor/config.ts";
-import { executeAdvisor, resetAdvisorUsage } from "../extensions/advisor/advisor/execute.ts";
+import { executeAdvisor, getAdvisorUsesThisRun, resetAdvisorUsage } from "../extensions/advisor/advisor/execute.ts";
 import { resetNudgeRunState } from "../extensions/advisor/advisor/nudges.ts";
 import { setAdvisorEffort, setAdvisorModel } from "../extensions/advisor/advisor/state.ts";
 
@@ -94,6 +94,28 @@ test("runtime completion uses canonical context and adaptive onPayload without e
 	assert.doesNotMatch(serialized, /RAW PRE-COMPACTION DETAIL/);
 });
 
+test("tool inventory precedes curated context while empty inventory remains omitted", async () => {
+	const tool = { name: "read", description: "Read a file", parameters: { type: "object" } };
+	for (const [tools, expectedCount] of [[[tool], 1], [[], 0]]) {
+		let receivedMessages;
+		const runtimeComplete = async (_model, context) => {
+			receivedMessages = context.messages;
+			return response();
+		};
+		await executeAdvisor(makeContext({ runtimeComplete }), { getAllTools: () => tools }, undefined, undefined);
+		const inventoryIndexes = receivedMessages
+			.map((message, index) => JSON.stringify(message).includes("Available Executor Tools") ? index : -1)
+			.filter((index) => index >= 0);
+		assert.equal(inventoryIndexes.length, expectedCount);
+		if (expectedCount) {
+			assert.equal(inventoryIndexes[0], 0);
+			assert.match(JSON.stringify(receivedMessages[0]), /### read/);
+			assert.match(JSON.stringify(receivedMessages[1]), /Context policy/);
+		}
+		resetAdvisorUsage();
+	}
+});
+
 test("compatibility completion receives auth and adaptive onPayload", async () => {
 	let receivedOptions;
 	globalThis.__piAdvisorCompatCompleteSimple = async (_model, _context, options) => {
@@ -118,28 +140,26 @@ test("returns structured results for usage, model, auth, context, response, and 
 		assert.equal(result.details.errorMessage, "max_uses_exceeded");
 	});
 
-	await t.test("no model", async () => {
+	await t.test("validation failures do not consume usage", async () => {
 		resetAdvisorUsage();
 		setAdvisorModel(undefined);
-		const result = await executeAdvisor(makeContext(), pi, undefined, undefined);
+		let result = await executeAdvisor(makeContext(), pi, undefined, undefined);
 		assert.equal(result.details.errorMessage, "no advisor model selected");
 		assert.equal("advisorModel" in result.details, false);
-	});
+		assert.equal(getAdvisorUsesThisRun(), 0);
 
-	await t.test("auth", async () => {
-		resetAdvisorUsage();
 		setAdvisorModel({ provider: "litellm", id: "claude-opus-4-8" });
-		const ctx = makeContext();
-		ctx.modelRegistry.getApiKeyAndHeaders = async () => ({ ok: false, error: "bad auth" });
-		const result = await executeAdvisor(ctx, pi, undefined, undefined);
+		const authContext = makeContext();
+		authContext.modelRegistry.getApiKeyAndHeaders = async () => ({ ok: false, error: "bad auth" });
+		result = await executeAdvisor(authContext, pi, undefined, undefined);
 		assert.equal(result.details.errorMessage, "bad auth");
-	});
+		assert.equal(getAdvisorUsesThisRun(), 0);
 
-	await t.test("no context", async () => {
-		resetAdvisorUsage();
 		globalThis.__piCodingAgentBuildSessionContext = () => ({ messages: [], thinkingLevel: "off", model: null });
-		const result = await executeAdvisor(makeContext(), pi, undefined, undefined);
+		result = await executeAdvisor(makeContext(), pi, undefined, undefined);
 		assert.equal(result.details.errorMessage, "no_context");
+		assert.equal(getAdvisorUsesThisRun(), 0);
+		delete globalThis.__piCodingAgentBuildSessionContext;
 	});
 
 	await t.test("aborted", async () => {

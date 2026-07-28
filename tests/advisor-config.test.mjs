@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -87,11 +87,12 @@ test("round-trips the complete config without changing colon keys or unknown fie
 		assert.ok(Object.hasOwn(loadJsonConfig(path).byExecutor, "openai:gpt-5"));
 	}));
 
-test("save failure is observable", () =>
+test("save failure is observable and cleans up the same-directory temporary file", () =>
 	withTempDir((directory) => {
 		const directoryAsFile = join(directory, "not-a-file");
 		mkdirSync(directoryAsFile);
 		assert.equal(saveJsonConfig(directoryAsFile, { default: { modelStub: "a:b" } }), false);
+		assert.deepEqual(readdirSync(directory), ["not-a-file"]);
 	}));
 
 test("updates one mapping while preserving unrelated and unknown config fields", () => {

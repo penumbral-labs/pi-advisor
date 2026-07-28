@@ -9,8 +9,8 @@ import {
 } from "./config.js";
 import {
 	BASE_EFFORT_LEVELS, CHECKMARK, DEFAULT_EFFORT, DEFAULT_EXECUTOR_VALUE, errSelectionNotFound,
-	MSG_ADVISOR_DISABLED, MSG_CONFIG_SAVE_FAILED, MSG_REQUIRES_INTERACTIVE, msgAdvisorEnabled,
-	msgClearedForExecutor, msgSavedForExecutor, NO_ADVISOR_VALUE, NUDGE_DEFAULT_VALUE, OFF_VALUE,
+	MSG_ADVISOR_DISABLED, MSG_CONFIG_SAVE_FAILED, MSG_DEFAULT_CLEARED, MSG_REQUIRES_INTERACTIVE, msgAdvisorEnabled,
+	msgClearedForExecutor, msgSavedForDefault, msgSavedForExecutor, NO_ADVISOR_VALUE, NUDGE_DEFAULT_VALUE, OFF_VALUE,
 	RECOMMENDED_EFFORT_SUFFIX, XHIGH_EFFORT_LEVEL,
 } from "./messages.js";
 import { reconcileAdvisorTool } from "./handlers.js";
@@ -66,7 +66,7 @@ export function registerAdvisorCommand(pi: ExtensionAPI): void {
 						setAdvisorModel(undefined); setAdvisorEffort(undefined); setActiveExecutorKey(activeExecutor);
 						reconcileAdvisorTool(pi, false); ctx.ui.notify(MSG_ADVISOR_DISABLED, "info");
 					}
-				} else ctx.ui.notify(msgClearedForExecutor(executorStub!), "info");
+				} else ctx.ui.notify(executorStub ? msgClearedForExecutor(executorStub) : MSG_DEFAULT_CLEARED, "info");
 				return;
 			}
 
@@ -98,7 +98,7 @@ export function registerAdvisorCommand(pi: ExtensionAPI): void {
 			if (affectsActive) {
 				setAdvisorModel(picked); setAdvisorEffort(effort); setActiveExecutorKey(activeExecutor); reconcileAdvisorTool(pi, true);
 				ctx.ui.notify(msgAdvisorEnabled(pickedStub, effort, executorStub ?? "default"), "info");
-			} else ctx.ui.notify(msgSavedForExecutor(executorStub!, pickedStub, effort), "info");
+			} else ctx.ui.notify(executorStub ? msgSavedForExecutor(executorStub, pickedStub, effort) : msgSavedForDefault(pickedStub, effort), "info");
 		},
 	});
 }

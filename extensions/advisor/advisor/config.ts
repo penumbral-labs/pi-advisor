@@ -5,7 +5,7 @@
  * guidance validation, per-executor resolution, and JSON I/O.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-ai";
@@ -13,6 +13,12 @@ import type { NudgeConfig } from "./nudges.js";
 
 export const ADVISOR_CONFIG_PATH = join(homedir(), ".pi", "agent", "pi-advisor.json");
 let advisorConfigPath = ADVISOR_CONFIG_PATH;
+const advisorConfigInvalidators = new Set<() => void>();
+
+export function onAdvisorConfigSaved(invalidate: () => void): () => void {
+	advisorConfigInvalidators.add(invalidate);
+	return () => { advisorConfigInvalidators.delete(invalidate); };
+}
 
 /** @internal Override the config file for isolated tests; returns a restore function. */
 export function __setAdvisorConfigPathForTests(path: string): () => void {
@@ -64,19 +70,24 @@ export function loadAdvisorConfig(): AdvisorConfig {
 	return loadJsonConfig<AdvisorConfig>(advisorConfigPath);
 }
 
-/** Persist formatted JSON. The default umask controls permissions. */
+/** Persist formatted JSON atomically. The default umask controls permissions. */
 export function saveJsonConfig(path: string, config: object): boolean {
+	const tempPath = join(dirname(path), `.${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.tmp`);
 	try {
 		mkdirSync(dirname(path), { recursive: true });
-		writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+		writeFileSync(tempPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+		renameSync(tempPath, path);
 		return true;
 	} catch {
+		try { rmSync(tempPath, { force: true }); } catch {}
 		return false;
 	}
 }
 
 export function writeAdvisorConfig(config: AdvisorConfig): boolean {
-	return saveJsonConfig(advisorConfigPath, config);
+	const saved = saveJsonConfig(advisorConfigPath, config);
+	if (saved) for (const invalidate of advisorConfigInvalidators) invalidate();
+	return saved;
 }
 
 /** Resolve a specific executor mapping first, then fall back to the default. */
