@@ -1,146 +1,184 @@
 # @penumbral-labs/pi-advisor
 
-Per-executor advisor selection for [Pi Agent](https://github.com/badlogic/pi-mono). Forked from
-[`@juicesharp/rpiv-advisor`](https://www.npmjs.com/package/@juicesharp/rpiv-advisor) — same
-advisor-strategy pattern, but the advisor model and reasoning effort are keyed by the **current
-primary/executor model** so they swap automatically when you change models.
+An advisor-strategy extension for [Pi](https://github.com/badlogic/pi-mono) with advisor model and reasoning effort
+selected per executor model.
 
-## Why
-
-If you switch primary models often, a single hard-coded advisor isn't always the right pairing. With
-this fork:
-
-- Run Sonnet → advisor is Opus.
-- Switch to GPT-5.5 → advisor swaps to Gemini 3 Pro.
-- Switch to Gemini 3 Pro → advisor swaps to Opus.
-
-You configure each pairing once with `/advisor`; the rest is automatic.
+A fast executor can consult a stronger reviewer only when independent judgment could materially change the approach.
+Switching Pi's primary model immediately resolves the matching advisor pairing, effort, and nudge sensitivity.
 
 ## Install
 
 ```bash
-pi remove npm:@juicesharp/rpiv-advisor   # if installed
 pi install git:github.com/penumbral-labs/pi-advisor
 ```
 
-This is a clean fork: existing `~/.config/rpiv-advisor/advisor.json` is
-ignored. Run `/advisor` once after install to set up your pairings.
+If the upstream package is installed, remove it first so only one extension registers the `advisor` command and tool:
 
-## Usage
-
-- `/advisor` — picks an advisor model (and reasoning effort, when applicable) for the **current
-  executor**. Selection is saved under that executor's key. If no global default exists yet, the
-  first selection also seeds the default so other executors get a sane fallback until they're
-  configured individually.
-- Switching executor mid-session triggers an automatic re-resolution and (if needed) a swap.
-- "No advisor" disables the advisor for the current executor only.
-
-The `advisor` tool is registered at load but excluded from active tools whenever no advisor is
-selected for the current executor. Calling it forwards the curated conversation branch to the
-resolved advisor model. Use it selectively when independent judgment could materially change the
-approach, not as a mandatory beginning-or-end lifecycle check.
-
-## Config schema
-
-`~/.pi/agent/pi-advisor.json` (colocated with other pi-plugin config; default
-0644 perms — the file contains model identifiers and effort strings, no
-credentials):
-
-```json
-{
-  "default": { "modelStub": "anthropic:claude-opus-4-7", "effort": "xhigh" },
-  "byExecutor": {
-    "anthropic:claude-sonnet-4-6":  { "modelStub": "anthropic:claude-opus-4-7", "effort": "xhigh" },
-    "llm-router:azure/gpt-5.5":     { "modelStub": "google:gemini-3-pro",       "effort": "high"  },
-    "google:gemini-3-pro":          { "modelStub": "anthropic:claude-opus-4-7", "effort": "high"  }
-  }
-}
+```bash
+pi remove npm:@juicesharp/rpiv-advisor
 ```
 
-`modelStub` and the `byExecutor` map keys are both `<provider>:<modelId>`
-strings. Named `Stub` rather than `Key` so corporate Semgrep doesn't false-flag
-them as credentials.
+The package requires Node.js 22.6 or newer and uses the Pi runtime's installed peer dependencies.
 
-Resolution order for the active executor:
+## Configure per-executor pairings
 
-1. `byExecutor[<provider>:<modelId>]`, if present and has `modelStub`.
-2. `default`, if present and has `modelStub`.
+1. Start Pi with the executor model you want to configure.
+2. Run `/advisor`.
+3. Select the executor, advisor model, reasoning effort, and nudge sensitivity.
+4. Repeat for other executor models as needed.
 
-If nothing resolves, the advisor is disabled.
+The first advisor selection also seeds the default fallback when no default exists. Selecting **No advisor** removes the
+chosen executor's mapping; if a default remains, that executor falls back to it.
+
+A model switch during a session re-resolves the mapping immediately. If the mapping is missing, malformed, or points to
+an unavailable model, Pi clears stale advisor state and removes the tool from the active set.
+
+## Use the advisor
+
+Pi may call the tool when its judgment could materially improve the plan, recovery, or final review. You can also ask Pi
+to consult it explicitly.
+
+```ts
+advisor(); // stage inferred from executor activity
+advisor({ stage: "initial" });
+advisor({ stage: "recovery" });
+advisor({ stage: "final-check" });
+```
+
+The advisor receives a bounded, curated view of Pi's canonical conversation context. Compaction and branch summaries are
+preserved, while tool-call blocks, raw tool results, and excess transcript text are omitted or clamped. The request also
+includes the inferred or explicit stage, recent tool activity, mutation count, verification commands, and recent
+failures.
+
+Calls use Pi's auth-aware model runtime when available, preserving provider auth and endpoint resolution. Compatible
+older hosts load `completeSimple` through Pi's compatibility entrypoint. LiteLLM adaptive-thinking payloads are
+normalized for supported Claude models on both paths.
 
 ## Automatic nudges
 
-Beyond on-demand `advisor()` calls, the extension injects a one-line "consider calling advisor"
-hint when tool activity crosses a threshold. Three triggers, in priority order:
+The extension can inject a short suggestion to consult the advisor after:
 
-1. **Pre-execution** — the first `edit`/`write` after `preExecutionMinExploration` (default 3)
-   read/bash calls. This is the noisiest trigger: any read-then-write session fires it.
-2. **Mutation burst** — exactly the `mutationBurst`th (default 4) mutation.
-3. **Long run** — exactly the `longRunToolCalls`th (default 15) total tool call.
+- the first mutation following enough exploratory reads or shell commands;
+- a configured burst of edits and writes; or
+- a long run of tool calls.
 
-`backoffToolCalls` (default 20) is the minimum session-level tool calls between nudges.
+Nudges are suggestions, not advisor calls. At most one fires per run, session-level backoff suppresses follow-up
+micro-turns, and an actual advisor call suppresses later nudges in that run. The `/advisor` picker offers:
 
-Pick sensitivity per executor in `/advisor`, or hand-edit a `nudge` block. The presets:
+| Preset    | Pre-execution | Mutation burst | Long run | Backoff |
+| --------- | ------------: | -------------: | -------: | ------: |
+| `heavy`   |            on |              2 |        8 |      10 |
+| `default` |            on |              4 |       15 |      20 |
+| `light`   |           off |              8 |       30 |      40 |
+| `off`     |      disabled |              — |        — |       — |
 
-| Preset    | preExecution | mutationBurst | longRunToolCalls | backoffToolCalls |
-| --------- | ------------ | ------------- | ---------------- | ---------------- |
-| `heavy`   | on           | 2             | 8                | 10               |
-| `default` | on           | 4             | 15               | 20               |
-| `light`   | **off**      | 8             | 30               | 40               |
-| `off`     | — (`disabled: true`) | | | |
+`quietPaths` silences only automatic nudges for matching working directories. Manual and model-initiated advisor calls
+remain available.
 
-`preExecution: false` keeps the burst/long-run safety nets but drops trigger 1 — the right shape
-for strong models that don't need pre-write hand-holding. `nudge` merges over the top-level `nudge`
-over `DEFAULT_NUDGE_CONFIG`, so any subset of keys is valid.
+## Config
 
-`quietPaths` (top level) silences **all** automatic nudges when the session cwd falls under a listed
-directory — for home-base / non-coding trees like an Obsidian vault — regardless of executor. The
-`advisor()` tool stays callable on demand. Trailing `/**` or `/` is optional; a leading `~` expands
-to the home directory; matching is segment-aware (`~/work-os` matches `~/work-os/wiki`, not
-`~/work-os-2`).
+Configuration is stored only at:
+
+```text
+~/.pi/agent/pi-advisor.json
+```
+
+Model stubs are always colon-delimited `<provider>:<modelId>` strings:
 
 ```json
 {
-  "quietPaths": ["~/work-os/**"],
+  "default": {
+    "modelStub": "anthropic:claude-opus-4-7",
+    "effort": "high"
+  },
   "byExecutor": {
-    "anthropic:claude-opus-4-8": {
-      "modelStub": "llm-router:azure/gpt-5.5",
+    "anthropic:claude-sonnet-4-6": {
+      "modelStub": "anthropic:claude-opus-4-7",
       "effort": "xhigh",
-      "nudge": { "preExecution": false, "mutationBurst": 8, "longRunToolCalls": 30, "backoffToolCalls": 40 }
+      "nudge": {
+        "preExecution": false,
+        "mutationBurst": 8,
+        "longRunToolCalls": 30,
+        "backoffToolCalls": 40
+      }
     }
-  }
+  },
+  "maxUsesPerRun": 5,
+  "maxContextMessages": 18,
+  "quietPaths": ["~/work-os/**"]
 }
 ```
 
-## Tool
+Resolution order is `byExecutor[<provider>:<modelId>]`, then `default`. Nudge settings merge in the order built-in
+defaults, top-level `nudge`, then the resolved executor entry's `nudge`.
 
-```ts
-advisor()                       // stage inferred from recent activity
-advisor({ stage: "recovery" }) // explicit initial, recovery, or final-check stage
-```
+See [Configuration](docs/configuration.md) for every field and merge rule.
 
-Returns:
+## Tool result
+
+The tool returns Pi's standard text content plus structured details:
 
 ```ts
 {
-  content: [{ type: "text", text: string }], // reviewer's guidance, or error message
+  content: [{ type: "text", text: string }],
   details: {
-    advisorModel?: string,        // "<provider>:<modelId>"
+    advisorModel?: string,
     effort?: ThinkingLevel,
     usage?: Usage,
     stopReason?: StopReason,
-    errorMessage?: string,
+    errorMessage?: string
   }
 }
 ```
 
+Failures such as no mapping, unavailable auth, no context, cancellation, empty output, provider errors, thrown errors,
+and the per-run usage cap are returned in this envelope rather than escaping as unstructured exceptions.
+
+See [Tool reference](docs/tool-reference.md) for stages, context policy, and error behavior.
+
+## Troubleshooting
+
+### `/advisor` is missing
+
+Run `pi list` and confirm this package is enabled. Remove another advisor extension if both register the same command,
+then restart Pi.
+
+### The advisor tool is inactive
+
+Run `/advisor` for the current executor. Confirm both the executor map key and `modelStub` use `<provider>:<modelId>`
+and that the advisor model appears in Pi's model picker. A missing or unavailable resolved model intentionally disables
+the tool.
+
+### The advisor reports an auth error
+
+Configure the advisor provider through Pi's normal login or provider configuration. The extension uses Pi's resolved
+auth and request routing; it does not store provider credentials.
+
+### Changes do not save
+
+The picker reports config write failures instead of claiming success. Verify that `~/.pi/agent` exists or can be created
+and that your user can write `pi-advisor.json`.
+
+### Nudges are too frequent or absent
+
+Choose a different preset in `/advisor`, or inspect top-level and per-executor `nudge` values. Also check `quietPaths`,
+`maxUsesPerRun`, and whether an advisor call already happened in the current run.
+
+## Development
+
+```bash
+npm test
+pi -e ./extensions/advisor/index.ts
+```
+
+`npm test` includes package-content verification and an isolated user-perspective Pi loader smoke test with a
+deterministic completion provider. The smoke test does not read or modify the normal user config.
+
 ## Credits
 
-Forked from [`@juicesharp/rpiv-advisor`](https://github.com/juicesharp/rpiv-mono/tree/main/packages/rpiv-advisor)
-v1.5.2 by [juicesharp](https://github.com/juicesharp). Original design — advisor-strategy pattern,
-zero-parameter handoff, tool-inventory cache parity, in-flight-call stripping, user-tail nudge — is
-unchanged. This fork adds executor-keyed configuration, a `model_select` event handler, and a
-config-path rebrand.
+Forked from [`@juicesharp/rpiv-advisor`](https://github.com/juicesharp/rpiv-mono/tree/main/packages/rpiv-advisor) v2.1.0
+by [juicesharp](https://github.com/juicesharp). This fork preserves the advisor-strategy design while adding
+per-executor mappings and the documented context, usage, and nudge behavior.
 
 ## License
 

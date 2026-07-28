@@ -1,6 +1,6 @@
 {
 	"name": "@penumbral-labs/pi-advisor",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"description": "Advisor-strategy pattern for Pi Agent with per-executor advisor models. Forked from @juicesharp/rpiv-advisor.",
 	"keywords": [
 		"pi-package",
@@ -10,7 +10,7 @@
 	],
 	"type": "module",
 	"scripts": {
-		"test": "node --experimental-strip-types --test tests/*.test.mjs"
+		"test": "node --experimental-strip-types --import ./tests/ts-specifier-hook.mjs --test tests/*.test.mjs"
 	},
 	"license": "MIT",
 	"author": "Aaron Small",
@@ -23,11 +23,13 @@
 		"url": "https://github.com/penumbral-labs/pi-advisor/issues"
 	},
 	"engines": {
-		"node": ">=20.6.0"
+		"node": ">=22.6.0"
 	},
 	"files": [
 		"extensions",
 		"README.md",
+		"CHANGELOG.md",
+		"docs",
 		"LICENSE"
 	],
 	"pi": {
