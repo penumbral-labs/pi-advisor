@@ -6,6 +6,7 @@ import test, { afterEach, beforeEach } from "node:test";
 
 import { __setAdvisorConfigPathForTests } from "../extensions/advisor/advisor/config.ts";
 import { executeAdvisor, getAdvisorUsesThisRun, resetAdvisorUsage } from "../extensions/advisor/advisor/execute.ts";
+import { pushRunToolEvent } from "../extensions/advisor/advisor/execution-context.ts";
 import { resetNudgeRunState } from "../extensions/advisor/advisor/nudges.ts";
 import { setAdvisorEffort, setAdvisorModel } from "../extensions/advisor/advisor/state.ts";
 
@@ -116,6 +117,38 @@ test("tool inventory precedes curated context while empty inventory remains omit
 	}
 });
 
+test("concurrent calls reserve the max-use slot before awaiting auth", async () => {
+	writeFileSync(configPath, JSON.stringify({ maxUsesPerRun: 1 }));
+	let releaseAuth;
+	const authReady = new Promise((resolve) => { releaseAuth = resolve; });
+	let authChecks = 0;
+	let completionsStarted = 0;
+	const ctx = makeContext({
+		runtimeComplete: async () => {
+			completionsStarted++;
+			return response();
+		},
+	});
+	ctx.modelRegistry.getApiKeyAndHeaders = async () => {
+		authChecks++;
+		await authReady;
+		return { ok: true, apiKey: "test-key", headers: {} };
+	};
+
+	const first = executeAdvisor(ctx, pi, undefined, undefined);
+	const second = executeAdvisor(ctx, pi, undefined, undefined);
+	const secondResult = await second;
+	assert.equal(secondResult.details.errorMessage, "max_uses_exceeded");
+	assert.equal(authChecks, 1);
+	assert.equal(completionsStarted, 0);
+
+	releaseAuth();
+	const firstResult = await first;
+	assert.equal(firstResult.content[0].text, "advice");
+	assert.equal(completionsStarted, 1);
+	assert.equal(getAdvisorUsesThisRun(), 1);
+});
+
 test("compatibility completion receives auth and adaptive onPayload", async () => {
 	let receivedOptions;
 	globalThis.__piAdvisorCompatCompleteSimple = async (_model, _context, options) => {
@@ -138,9 +171,11 @@ test("returns structured results for usage, model, auth, context, response, and 
 		const ctx = makeContext({ runtimeComplete: async () => response() });
 		const result = await executeAdvisor(ctx, pi, undefined, undefined);
 		assert.equal(result.details.errorMessage, "max_uses_exceeded");
+		writeFileSync(configPath, "{}\n");
 	});
 
-	await t.test("validation failures do not consume usage", async () => {
+	await t.test("validation failures release their usage reservation", async () => {
+		writeFileSync(configPath, JSON.stringify({ maxUsesPerRun: 1 }));
 		resetAdvisorUsage();
 		setAdvisorModel(undefined);
 		let result = await executeAdvisor(makeContext(), pi, undefined, undefined);
@@ -155,11 +190,28 @@ test("returns structured results for usage, model, auth, context, response, and 
 		assert.equal(result.details.errorMessage, "bad auth");
 		assert.equal(getAdvisorUsesThisRun(), 0);
 
+		const missingKeyContext = makeContext();
+		missingKeyContext.modelRegistry.getApiKeyAndHeaders = async () => ({ ok: true });
+		result = await executeAdvisor(missingKeyContext, pi, undefined, undefined);
+		assert.match(result.details.errorMessage, /no api key/i);
+		assert.equal(getAdvisorUsesThisRun(), 0);
+
 		globalThis.__piCodingAgentBuildSessionContext = () => ({ messages: [], thinkingLevel: "off", model: null });
 		result = await executeAdvisor(makeContext(), pi, undefined, undefined);
 		assert.equal(result.details.errorMessage, "no_context");
 		assert.equal(getAdvisorUsesThisRun(), 0);
 		delete globalThis.__piCodingAgentBuildSessionContext;
+
+		pushRunToolEvent({ toolName: "edit", summary: "edit source.ts", isError: false, timestamp: 1 });
+		let successfulContext;
+		result = await executeAdvisor(makeContext({ runtimeComplete: async (_model, context) => {
+			successfulContext = context;
+			return response("after validation");
+		} }), pi, undefined, undefined);
+		assert.equal(result.content[0].text, "after validation");
+		assert.equal(getAdvisorUsesThisRun(), 1);
+		assert.match(JSON.stringify(successfulContext), /Implementation is in progress/);
+		assert.doesNotMatch(JSON.stringify(successfulContext), /checking course again/);
 	});
 
 	await t.test("aborted", async () => {
@@ -167,6 +219,7 @@ test("returns structured results for usage, model, auth, context, response, and 
 		const result = await executeAdvisor(makeContext({ runtimeComplete: async () => response(undefined, "aborted") }), pi, undefined, undefined);
 		assert.equal(result.details.stopReason, "aborted");
 		assert.equal(result.details.errorMessage, "aborted");
+		assert.equal(getAdvisorUsesThisRun(), 1);
 	});
 
 	await t.test("error", async () => {
@@ -174,17 +227,20 @@ test("returns structured results for usage, model, auth, context, response, and 
 		const result = await executeAdvisor(makeContext({ runtimeComplete: async () => response(undefined, "error", "502") }), pi, undefined, undefined);
 		assert.equal(result.details.stopReason, "error");
 		assert.equal(result.details.errorMessage, "502");
+		assert.equal(getAdvisorUsesThisRun(), 1);
 	});
 
 	await t.test("empty", async () => {
 		resetAdvisorUsage();
 		const result = await executeAdvisor(makeContext({ runtimeComplete: async () => response("   ") }), pi, undefined, undefined);
 		assert.equal(result.details.errorMessage, "empty response");
+		assert.equal(getAdvisorUsesThisRun(), 1);
 	});
 
 	await t.test("thrown", async () => {
 		resetAdvisorUsage();
 		const result = await executeAdvisor(makeContext({ runtimeComplete: async () => { throw new Error("boom"); } }), pi, undefined, undefined);
 		assert.equal(result.details.errorMessage, "boom");
+		assert.equal(getAdvisorUsesThisRun(), 1);
 	});
 });

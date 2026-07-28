@@ -97,13 +97,23 @@ export async function executeAdvisor(
 			"max_uses_exceeded",
 		);
 	}
+	const callNumber = ++usesThisRun;
+	const releaseReservation = (): void => { usesThisRun--; };
+
 	const advisor = getAdvisorModel();
-	if (!advisor) return buildErrorResult(undefined, effort, ERR_NO_MODEL, ERR_NO_MODEL_SELECTED);
+	if (!advisor) {
+		releaseReservation();
+		return buildErrorResult(undefined, effort, ERR_NO_MODEL, ERR_NO_MODEL_SELECTED);
+	}
 	const advisorLabel = `${advisor.provider}:${advisor.id}`;
 
 	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(advisor);
-	if (!auth.ok) return buildErrorResult(advisorLabel, effort, errMisconfigured(advisorLabel, auth.error), auth.error);
+	if (!auth.ok) {
+		releaseReservation();
+		return buildErrorResult(advisorLabel, effort, errMisconfigured(advisorLabel, auth.error), auth.error);
+	}
 	if (!auth.apiKey) {
+		releaseReservation();
 		return buildErrorResult(advisorLabel, effort, errNoApiKey(advisorLabel), errNoApiKeyDetail(advisor.provider));
 	}
 
@@ -112,7 +122,7 @@ export async function executeAdvisor(
 		ctx.sessionManager.getLeafId(),
 	);
 	const canonicalMessages = stripInflightAdvisorCall(convertToLlm(sessionMessages));
-	const executionContext = buildExecutorContext(getRunToolEvents(), usesThisRun + 1, stageOverride);
+	const executionContext = buildExecutorContext(getRunToolEvents(), callNumber, stageOverride);
 	const curatedMessages = curateAdvisorMessages(
 		canonicalMessages,
 		executionContext.stageInfo,
@@ -122,6 +132,7 @@ export async function executeAdvisor(
 	);
 	const branchMessages = ensureUserTailForAdvisor(curatedMessages);
 	if (branchMessages.length === 0) {
+		releaseReservation();
 		return buildErrorResult(
 			advisorLabel,
 			effort,
@@ -132,13 +143,22 @@ export async function executeAdvisor(
 	const inventoryMessage = getInventoryMessage(pi.getAllTools());
 	const messages: Message[] = inventoryMessage ? [inventoryMessage, ...branchMessages] : branchMessages;
 
+	const runtimeComplete = getRuntimeCompleteSimple(ctx.modelRegistry);
+	let complete = runtimeComplete;
+	if (!complete) {
+		try {
+			complete = await loadCompleteSimple();
+		} catch (error) {
+			releaseReservation();
+			const message = error instanceof Error ? error.message : String(error);
+			return buildErrorResult(advisorLabel, effort, errCallThrew(message), message);
+		}
+	}
+	const options = runtimeComplete
+		? { signal, reasoning: effort }
+		: { apiKey: auth.apiKey, headers: auth.headers, signal, reasoning: effort };
+
 	try {
-		const runtimeComplete = getRuntimeCompleteSimple(ctx.modelRegistry);
-		const complete = runtimeComplete ?? await loadCompleteSimple();
-		const options = runtimeComplete
-			? { signal, reasoning: effort }
-			: { apiKey: auth.apiKey, headers: auth.headers, signal, reasoning: effort };
-		usesThisRun++;
 		onUpdate?.({
 			content: [{ type: "text", text: msgConsulting(advisorLabel, effort) }],
 			details: { advisorModel: advisorLabel, effort },

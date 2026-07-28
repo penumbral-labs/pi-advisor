@@ -176,7 +176,7 @@ deterministic completion provider. The smoke test does not read or modify the no
 
 ## Credits
 
-Forked from [`@juicesharp/rpiv-advisor`](https://github.com/juicesharp/rpiv-mono/tree/main/packages/rpiv-advisor) v1.5.2
+Forked from [`@juicesharp/rpiv-advisor`](https://github.com/juicesharp/rpiv-mono/tree/main/packages/rpiv-advisor) v2.1.0
 by [juicesharp](https://github.com/juicesharp). This fork preserves the advisor-strategy design while adding
 per-executor mappings and the documented context, usage, and nudge behavior.
 
