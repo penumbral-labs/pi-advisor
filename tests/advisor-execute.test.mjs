@@ -149,6 +149,38 @@ test("concurrent calls reserve the max-use slot before awaiting auth", async () 
 	assert.equal(getAdvisorUsesThisRun(), 1);
 });
 
+test("rejecting auth resolver returns a structured error and releases the usage slot", async () => {
+	writeFileSync(configPath, JSON.stringify({ maxUsesPerRun: 1 }));
+	let rejectAuth = true;
+	let completionsStarted = 0;
+	const ctx = makeContext({
+		runtimeComplete: async () => {
+			completionsStarted++;
+			return response("advice after auth recovery");
+		},
+	});
+	ctx.modelRegistry.getApiKeyAndHeaders = async () => {
+		if (rejectAuth) throw new Error("auth resolver unavailable");
+		return { ok: true, apiKey: "test-key", headers: {} };
+	};
+
+	const failedResult = await executeAdvisor(ctx, pi, undefined, undefined);
+	assert.equal(failedResult.content[0].text, "Advisor call threw: auth resolver unavailable");
+	assert.deepEqual(failedResult.details, {
+		advisorModel: "litellm:claude-opus-4-8",
+		effort: "high",
+		errorMessage: "auth resolver unavailable",
+	});
+	assert.equal(getAdvisorUsesThisRun(), 0);
+	assert.equal(completionsStarted, 0);
+
+	rejectAuth = false;
+	const successfulResult = await executeAdvisor(ctx, pi, undefined, undefined);
+	assert.equal(successfulResult.content[0].text, "advice after auth recovery");
+	assert.equal(getAdvisorUsesThisRun(), 1);
+	assert.equal(completionsStarted, 1);
+});
+
 test("compatibility completion receives auth and adaptive onPayload", async () => {
 	let receivedOptions;
 	globalThis.__piAdvisorCompatCompleteSimple = async (_model, _context, options) => {

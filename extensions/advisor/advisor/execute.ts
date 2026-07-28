@@ -107,7 +107,14 @@ export async function executeAdvisor(
 	}
 	const advisorLabel = `${advisor.provider}:${advisor.id}`;
 
-	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(advisor);
+	let auth;
+	try {
+		auth = await ctx.modelRegistry.getApiKeyAndHeaders(advisor);
+	} catch (error) {
+		releaseReservation();
+		const message = error instanceof Error ? error.message : String(error);
+		return buildErrorResult(advisorLabel, effort, errCallThrew(message), message);
+	}
 	if (!auth.ok) {
 		releaseReservation();
 		return buildErrorResult(advisorLabel, effort, errMisconfigured(advisorLabel, auth.error), auth.error);
