@@ -45,8 +45,8 @@ summaries recorded by the extension, not raw tool output.
 
 The resolved advisor model and effort come from the current executor mapping. Calls use Pi's model runtime completion
 facade when the host provides it. That path keeps Pi's resolved authentication, headers, endpoint, and provider
-behavior. Compatible hosts without the facade load `completeSimple` through `@earendil-works/pi-ai/compat` and receive
-the auth values resolved by Pi's model registry.
+behavior. Compatible hosts without the facade load `completeSimple` through `@earendil-works/pi-ai/compat`, or through
+the package root when that export is unavailable, and receive the auth values resolved by Pi's model registry.
 
 For LiteLLM-routed supported Claude models, the completion hook converts `reasoning_effort` into adaptive thinking and
 an output effort value before the request is sent.
@@ -83,8 +83,9 @@ The tool returns the same result envelope for expected failures:
 | No canonical context              | `errorMessage: "no_context"`.                                          |
 | Provider abort                    | Returns the abort stop reason and diagnostic.                          |
 | Provider error                    | Returns the provider stop reason and error message.                    |
-| Empty text response               | `errorMessage: "empty response"`.                                      |
+| Empty text response               | After one identical retry, returns `errorMessage: "empty response"`.   |
 | Completion throws                 | Returns the thrown message without throwing through the tool boundary. |
 
-The usage counter increments when a call attempt starts, including attempts that later fail model, auth, context, or
-provider checks. Configure `maxUsesPerRun` in `~/.pi/agent/pi-advisor.json` when a different cap is appropriate.
+The usage counter increments when a completion request is attempted. Model, auth, context, and compatibility-loader
+failures release the reserved slot; provider aborts, errors, thrown completions, and empty responses consume it.
+Configure `maxUsesPerRun` in `~/.pi/agent/pi-advisor.json` when a different cap is appropriate.

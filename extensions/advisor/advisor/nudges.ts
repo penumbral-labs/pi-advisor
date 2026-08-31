@@ -34,6 +34,7 @@ export const NUDGE_PRESETS = {
 } as const satisfies Record<"heavy" | "default" | "light" | "off", NudgeConfig | undefined>;
 
 export type NudgePreset = keyof typeof NUDGE_PRESETS;
+export type NudgePresetDisplay = NudgePreset | "custom";
 
 interface NudgeRuntimeState {
 	nudgedThisRun: boolean;
@@ -75,6 +76,18 @@ export function detectNudgePreset(nudge: NudgeConfig | undefined): NudgePreset {
 	if ((nudge.mutationBurst ?? DEFAULT_NUDGE_CONFIG.mutationBurst) <= 3) return "heavy";
 	if ((nudge.mutationBurst ?? DEFAULT_NUDGE_CONFIG.mutationBurst) >= 6) return "light";
 	return "default";
+}
+
+export function detectExactNudgePreset(nudge: NudgeConfig | undefined): NudgePresetDisplay {
+	if (!nudge) return "default";
+	for (const preset of ["heavy", "light", "off"] as const) {
+		const expected = NUDGE_PRESETS[preset];
+		const keys = new Set([...Object.keys(nudge), ...Object.keys(expected)]);
+		if ([...keys].every((key) => nudge[key as keyof NudgeConfig] === expected[key as keyof NudgeConfig])) {
+			return preset;
+		}
+	}
+	return "custom";
 }
 
 export function shouldNudge(

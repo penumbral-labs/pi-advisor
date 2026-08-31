@@ -12,6 +12,7 @@ import {
 	resolveAdvisorEntry,
 	saveJsonConfig,
 	updateAdvisorConfig,
+	validateAdvisorEffort,
 	validateGuidanceFields,
 } from "../extensions/advisor/advisor/config.ts";
 
@@ -162,6 +163,23 @@ test("model stub codec accepts and emits colon keys only", () => {
 	assert.equal(parseModelStub("anthropic:"), undefined);
 	assert.equal(modelStubOf({ provider: "anthropic", id: "claude" }), "anthropic:claude");
 	assert.equal(modelStubOf(undefined), undefined);
+});
+
+test("advisor effort validation accepts current levels and rejects unknown values", () => {
+	assert.equal(validateAdvisorEffort("max", "test mapping"), "max");
+	assert.equal(validateAdvisorEffort(undefined, "test mapping"), undefined);
+	const warnings = [];
+	const originalWarn = console.warn;
+	console.warn = (message) => warnings.push(String(message));
+	try {
+		assert.equal(validateAdvisorEffort("ultra", "test mapping"), undefined);
+		assert.equal(validateAdvisorEffort("max", "limited model", ["low", "medium", "high"]), undefined);
+	} finally {
+		console.warn = originalWarn;
+	}
+	assert.equal(warnings.length, 2);
+	assert.match(warnings[0], /unsupported effort "ultra".*test mapping/i);
+	assert.match(warnings[1], /unsupported effort "max".*limited model/i);
 });
 
 test("guidance validation keeps only complete supported fields", () => {

@@ -55,7 +55,7 @@ Both `default` and values under `byExecutor` use this shape:
 | Field       | Type   | Meaning                                                                              |
 | ----------- | ------ | ------------------------------------------------------------------------------------ |
 | `modelStub` | string | Advisor model as `<provider>:<modelId>`.                                             |
-| `effort`    | string | Pi thinking level used for advisor completion. Omit for no explicit reasoning level. |
+| `effort`    | string | Supported Pi thinking level used for advisor completion. Omit for the model default. |
 | `nudge`     | object | Nudge overrides for this resolved entry.                                             |
 
 `byExecutor` keys also use `<provider>:<modelId>`. The model ID may itself contain `/`; the first colon separates the
@@ -68,7 +68,11 @@ For the active executor, resolution is:
 3. disabled when neither resolves.
 
 The `/advisor` command preserves unrelated top-level fields when saving. Its first successful selection seeds `default`
-if no default exists. Removing an executor-specific entry reveals the default fallback, if configured.
+if no default exists. Removing an executor-specific entry reveals the default fallback, if configured. The effort picker
+shows only levels advertised by the selected model, including `max` when supported. Choosing `off` or cancelling the
+effort step saves the model without an explicit effort, so the model default is used; cancelling the following nudge
+step preserves the current nudge setting and still saves the model. Unknown or model-unsupported hand-edited effort
+values are ignored with a visible warning during restore and marked unsupported in the mappings panel.
 
 ## Usage and context limits
 
@@ -97,8 +101,10 @@ Top-level `nudge` values apply globally. A resolved model entry's `nudge` values
 | `longRunToolCalls`           |    `15` | Nudge at exactly this many non-advisor tool calls.    |
 | `backoffToolCalls`           |    `20` | Session tool calls required since the last nudge.     |
 
-The picker writes `heavy`, `default`, `light`, and `off` presets. A run emits at most one automatic nudge, and an actual
-advisor call suppresses a later nudge in the same run.
+The picker writes the `heavy`, `light`, and `off` presets; choosing `default` removes the entry's nudge override so the
+global and built-in settings apply. Hand-edited overrides that do not exactly match a preset appear as `custom` and are
+preserved if the nudge picker is cancelled. A run emits at most one automatic nudge, and an actual advisor call
+suppresses a later nudge in the same run.
 
 ## Quiet paths
 

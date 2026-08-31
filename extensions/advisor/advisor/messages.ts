@@ -10,14 +10,14 @@ export const OFF_VALUE = "__off__";
 export const DEFAULT_EXECUTOR_VALUE = "__default__";
 export const NUDGE_DEFAULT_VALUE = "__nudge_default__";
 
-export const BASE_EFFORT_LEVELS: ThinkingLevel[] = ["minimal", "low", "medium", "high"];
-export const XHIGH_EFFORT_LEVEL: ThinkingLevel = "xhigh";
+export const EFFORT_LEVELS: readonly ThinkingLevel[] = ["minimal", "low", "medium", "high", "xhigh", "max"];
 export const DEFAULT_EFFORT: ThinkingLevel = "high";
 export const RECOMMENDED_EFFORT_SUFFIX = "  (recommended)";
 export const CHECKMARK = " ✓";
 
 export const MSG_ADVISOR_DISABLED = "Advisor disabled";
 export const MSG_CONFIG_SAVE_FAILED = "Advisor config could not be saved; selection was not changed.";
+export const MSG_EFFORT_NOT_SET = "Effort not set — advisor uses the model default";
 export const MSG_NO_ADVISOR_FOR_EXECUTOR = "No advisor configured for this executor; advisor disabled.";
 export const MSG_REQUIRES_INTERACTIVE = "/advisor requires interactive mode";
 export const MSG_ADVISOR_NUDGE = "Please advise on the executor's situation above.";
@@ -37,6 +37,8 @@ export const errCallFailed = (err: string | undefined) => `Advisor call failed: 
 export const errCallThrew = (msg: string) => `Advisor call threw: ${msg}`;
 export const errSelectionNotFound = (choice: string) => `Advisor selection not found: ${choice}`;
 export const errModelUnavailable = (key: string) => `Previously configured advisor model ${key} is no longer available`;
+export const errEffortUnsupported = (effort: string, model: string) =>
+	`Configured advisor effort ${effort} is unsupported by ${model}; using the model default`;
 export const msgAdvisorEnabled = (label: string, effort: ThinkingLevel | undefined, executorKey?: string) =>
 	`Advisor: ${label}${effort ? `, ${effort}` : ""}${executorKey ? ` (for ${executorKey})` : ""}`;
 export const msgAdvisorRestored = (label: string, effort: ThinkingLevel | undefined, executorKey?: string) =>

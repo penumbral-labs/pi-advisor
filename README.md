@@ -28,7 +28,9 @@ The package requires Node.js 22.6 or newer and uses the Pi runtime's installed p
 4. Repeat for other executor models as needed.
 
 The first advisor selection also seeds the default fallback when no default exists. Selecting **No advisor** removes the
-chosen executor's mapping; if a default remains, that executor falls back to it.
+chosen executor's mapping; if a default remains, that executor falls back to it. The effort picker includes only levels
+the chosen model supports, including `max` where advertised. Choosing `off` or cancelling that step uses the model's
+default reasoning level; cancelling the following nudge step keeps the mapping's current nudge setting.
 
 A model switch during a session re-resolves the mapping immediately. If the mapping is missing, malformed, or points to
 an unavailable model, Pi clears stale advisor state and removes the tool from the active set.
@@ -50,9 +52,10 @@ preserved, while tool-call blocks, raw tool results, and excess transcript text 
 includes the inferred or explicit stage, recent tool activity, mutation count, verification commands, and recent
 failures.
 
-Calls use Pi's auth-aware model runtime when available, preserving provider auth and endpoint resolution. Compatible
-older hosts load `completeSimple` through Pi's compatibility entrypoint. LiteLLM adaptive-thinking payloads are
-normalized for supported Claude models on both paths.
+Calls use Pi's auth-aware model runtime when available, preserving API-key or OAuth auth and endpoint resolution.
+Compatible older hosts load `completeSimple` through Pi's compatibility entrypoint and therefore require a literal API
+key. A normal response with no text is retried once with identical inputs before the tool reports an empty-response
+failure. LiteLLM adaptive-thinking payloads are normalized for supported Claude models on both paths.
 
 ## Automatic nudges
 
