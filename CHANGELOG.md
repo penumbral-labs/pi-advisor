@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- Support the `max` advisor effort when the selected model advertises it and hide unsupported effort levels.
+
+### Changed
+
+- Cancelling the effort picker now keeps the selected advisor and uses the model's default effort; cancelling the nudge
+  picker keeps the current nudge setting.
+- Unknown or model-unsupported persisted effort values are ignored with a warning during restore and labelled
+  unsupported in the `/advisor` mappings panel.
+- Hand-edited nudge overrides are labelled `custom` and are preserved when the nudge picker is cancelled.
+
+### Fixed
+
+- Allow OAuth-backed advisor models to complete through Pi's auth-aware runtime without requiring a literal API key.
+- Retry a normal empty advisor response once with identical inputs before returning an empty-response failure.
+
 ## [0.2.0] - 2026-07-27
 
 ### Added

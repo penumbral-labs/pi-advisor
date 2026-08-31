@@ -1,6 +1,6 @@
 /** Canonical-context advisor completion with structured result envelopes. */
 
-import type { Message, StopReason, ThinkingLevel, Usage } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Message, StopReason, ThinkingLevel, Usage } from "@earendil-works/pi-ai";
 import {
 	buildSessionContext,
 	convertToLlm,
@@ -52,6 +52,42 @@ export function getAdvisorUsesThisRun(): number {
 
 export function resetAdvisorUsage(): void {
 	usesThisRun = 0;
+}
+
+function advisorTextFromResponse(response: AssistantMessage): string {
+	return response.content
+		.filter((content): content is { type: "text"; text: string } => content.type === "text")
+		.map((content) => content.text)
+		.join("\n")
+		.trim();
+}
+
+function terminalResponseResult(
+	response: AssistantMessage,
+	advisorLabel: string,
+	effort: ThinkingLevel | undefined,
+): AgentToolResult<AdvisorDetails> | undefined {
+	if (response.stopReason === "aborted") {
+		return buildAdvisorResult({
+			text: ERR_CALL_ABORTED,
+			effort,
+			advisorLabel,
+			usage: response.usage,
+			stopReason: response.stopReason,
+			errorMessage: response.errorMessage ?? ERR_ABORTED_DETAIL,
+		});
+	}
+	if (response.stopReason === "error") {
+		return buildAdvisorResult({
+			text: errCallFailed(response.errorMessage),
+			effort,
+			advisorLabel,
+			usage: response.usage,
+			stopReason: response.stopReason,
+			errorMessage: response.errorMessage,
+		});
+	}
+	return undefined;
 }
 
 function buildAdvisorResult(opts: {
@@ -119,7 +155,8 @@ export async function executeAdvisor(
 		releaseReservation();
 		return buildErrorResult(advisorLabel, effort, errMisconfigured(advisorLabel, auth.error), auth.error);
 	}
-	if (!auth.apiKey) {
+	const runtimeComplete = getRuntimeCompleteSimple(ctx.modelRegistry);
+	if (!auth.apiKey && !runtimeComplete) {
 		releaseReservation();
 		return buildErrorResult(advisorLabel, effort, errNoApiKey(advisorLabel), errNoApiKeyDetail(advisor.provider));
 	}
@@ -150,7 +187,6 @@ export async function executeAdvisor(
 	const inventoryMessage = getInventoryMessage(pi.getAllTools());
 	const messages: Message[] = inventoryMessage ? [inventoryMessage, ...branchMessages] : branchMessages;
 
-	const runtimeComplete = getRuntimeCompleteSimple(ctx.modelRegistry);
 	let complete = runtimeComplete;
 	if (!complete) {
 		try {
@@ -170,48 +206,29 @@ export async function executeAdvisor(
 			content: [{ type: "text", text: msgConsulting(advisorLabel, effort) }],
 			details: { advisorModel: advisorLabel, effort },
 		});
-		const response = await completeAdvisor(
-			advisor,
-			{ systemPrompt: ADVISOR_SYSTEM_PROMPT, messages, tools: [] },
-			options,
-			complete,
-		);
+		const advisorContext = { systemPrompt: ADVISOR_SYSTEM_PROMPT, messages, tools: [] };
+		const callAdvisor = () => completeAdvisor(advisor, advisorContext, options, complete);
 
-		if (response.stopReason === "aborted") {
-			return buildAdvisorResult({
-				text: ERR_CALL_ABORTED,
-				effort,
-				advisorLabel,
-				usage: response.usage,
-				stopReason: response.stopReason,
-				errorMessage: response.errorMessage ?? ERR_ABORTED_DETAIL,
-			});
-		}
-		if (response.stopReason === "error") {
-			return buildAdvisorResult({
-				text: errCallFailed(response.errorMessage),
-				effort,
-				advisorLabel,
-				usage: response.usage,
-				stopReason: response.stopReason,
-				errorMessage: response.errorMessage,
-			});
-		}
+		let response = await callAdvisor();
+		const firstTerminal = terminalResponseResult(response, advisorLabel, effort);
+		if (firstTerminal) return firstTerminal;
 
-		const advisorText = response.content
-			.filter((content): content is { type: "text"; text: string } => content.type === "text")
-			.map((content) => content.text)
-			.join("\n")
-			.trim();
+		let advisorText = advisorTextFromResponse(response);
 		if (!advisorText) {
-			return buildAdvisorResult({
-				text: ERR_EMPTY_RESPONSE,
-				effort,
-				advisorLabel,
-				usage: response.usage,
-				stopReason: response.stopReason,
-				errorMessage: ERR_EMPTY_RESPONSE_DETAIL,
-			});
+			response = await callAdvisor();
+			const retryTerminal = terminalResponseResult(response, advisorLabel, effort);
+			if (retryTerminal) return retryTerminal;
+			advisorText = advisorTextFromResponse(response);
+			if (!advisorText) {
+				return buildAdvisorResult({
+					text: ERR_EMPTY_RESPONSE,
+					effort,
+					advisorLabel,
+					usage: response.usage,
+					stopReason: response.stopReason,
+					errorMessage: ERR_EMPTY_RESPONSE_DETAIL,
+				});
+			}
 		}
 		return buildAdvisorResult({
 			text: advisorText,

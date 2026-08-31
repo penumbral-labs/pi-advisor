@@ -9,6 +9,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync 
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-ai";
+import { EFFORT_LEVELS } from "./messages.js";
 import type { NudgeConfig } from "./nudges.js";
 
 export const ADVISOR_CONFIG_PATH = join(homedir(), ".pi", "agent", "pi-advisor.json");
@@ -68,6 +69,24 @@ export function loadJsonConfig<T extends object = AdvisorConfig>(path: string): 
 
 export function loadAdvisorConfig(): AdvisorConfig {
 	return loadJsonConfig<AdvisorConfig>(advisorConfigPath);
+}
+
+export function isAdvisorEffortSupported(
+	value: unknown,
+	supportedLevels: readonly string[] = EFFORT_LEVELS,
+): value is ThinkingLevel {
+	return EFFORT_LEVELS.includes(value as ThinkingLevel) && supportedLevels.includes(value as ThinkingLevel);
+}
+
+export function validateAdvisorEffort(
+	value: unknown,
+	context: string,
+	supportedLevels: readonly string[] = EFFORT_LEVELS,
+): ThinkingLevel | undefined {
+	if (value === undefined) return undefined;
+	if (isAdvisorEffortSupported(value, supportedLevels)) return value;
+	console.warn(`pi-advisor: unsupported effort "${String(value)}" in ${context}; using the model default`);
+	return undefined;
 }
 
 /** Persist formatted JSON atomically. The default umask controls permissions. */

@@ -10,8 +10,8 @@ import { getAdvisorEffort, getAdvisorModel, setActiveExecutorKey, setAdvisorEffo
 
 const executorA = { provider: "openai", id: "gpt-5", name: "GPT 5" };
 const executorB = { provider: "google", id: "gemini", name: "Gemini" };
-const advisorA = { provider: "anthropic", id: "opus", name: "Opus" };
-const advisorB = { provider: "anthropic", id: "sonnet", name: "Sonnet" };
+const advisorA = { provider: "anthropic", id: "opus", name: "Opus", reasoning: true };
+const advisorB = { provider: "anthropic", id: "sonnet", name: "Sonnet", reasoning: true };
 const testDirectory = mkdtempSync(join(tmpdir(), "pi-advisor-lifecycle-"));
 const testConfigPath = join(testDirectory, "pi-advisor.json");
 const productionConfigExisted = existsSync(ADVISOR_CONFIG_PATH);
@@ -59,6 +59,26 @@ test("restore resolves a specific executor before default and activates the tool
 	assert.equal(getAdvisorEffort(), "high");
 	assert.deepEqual(h.activeTools(), ["other", "advisor"]);
 	assert.equal(h.notifications.length, 1);
+});
+
+test("restore drops persisted effort unsupported by the advisor model", () => {
+	writeConfig({ byExecutor: { "openai:gpt-5": { modelStub: "anthropic:opus", effort: "max" } } });
+	setAdvisorEffort("high");
+	const warnings = [];
+	const originalWarn = console.warn;
+	console.warn = (message) => warnings.push(String(message));
+	try {
+		const h = harness();
+		applyAdvisorForExecutor(executorA, h.ctx, h.pi, "restore");
+		assert.equal(getAdvisorModel(), advisorA);
+		assert.equal(getAdvisorEffort(), undefined);
+		assert.deepEqual(h.activeTools(), ["other", "advisor"]);
+		assert.ok(h.notifications.some(([message, level]) => level === "warning" && /effort max is unsupported/i.test(message)));
+	} finally {
+		console.warn = originalWarn;
+	}
+	assert.equal(warnings.length, 1);
+	assert.match(warnings[0], /unsupported effort "max"/i);
 });
 
 test("model switch reconciles model and effort immediately", async () => {

@@ -181,6 +181,23 @@ test("rejecting auth resolver returns a structured error and releases the usage 
 	assert.equal(completionsStarted, 1);
 });
 
+test("OAuth auth without a literal key proceeds through the runtime facade", async () => {
+	let receivedOptions;
+	const runtimeComplete = async (_model, _context, options) => {
+		receivedOptions = options;
+		return response("oauth advice");
+	};
+	const ctx = makeContext({ runtimeComplete });
+	ctx.modelRegistry.getApiKeyAndHeaders = async () => ({ ok: true });
+
+	const result = await executeAdvisor(ctx, pi, undefined, undefined);
+
+	assert.equal(result.content[0].text, "oauth advice");
+	assert.equal("apiKey" in receivedOptions, false);
+	assert.equal("headers" in receivedOptions, false);
+	assert.equal(getAdvisorUsesThisRun(), 1);
+});
+
 test("compatibility completion receives auth and adaptive onPayload", async () => {
 	let receivedOptions;
 	globalThis.__piAdvisorCompatCompleteSimple = async (_model, _context, options) => {
@@ -262,11 +279,42 @@ test("returns structured results for usage, model, auth, context, response, and 
 		assert.equal(getAdvisorUsesThisRun(), 1);
 	});
 
-	await t.test("empty", async () => {
+	await t.test("empty response retries once with identical inputs", async () => {
 		resetAdvisorUsage();
-		const result = await executeAdvisor(makeContext({ runtimeComplete: async () => response("   ") }), pi, undefined, undefined);
-		assert.equal(result.details.errorMessage, "empty response");
+		const calls = [];
+		const result = await executeAdvisor(makeContext({ runtimeComplete: async (_model, context, options) => {
+			calls.push({ context, options });
+			return calls.length === 1 ? response("   ") : response("advice after retry");
+		} }), pi, undefined, undefined);
+		assert.equal(result.content[0].text, "advice after retry");
+		assert.equal(calls.length, 2);
+		assert.equal(calls[0].context, calls[1].context);
+		assert.deepEqual(calls[0].options, calls[1].options);
 		assert.equal(getAdvisorUsesThisRun(), 1);
+	});
+
+	await t.test("persistent empty response stops after one retry", async () => {
+		resetAdvisorUsage();
+		let calls = 0;
+		const result = await executeAdvisor(makeContext({ runtimeComplete: async () => {
+			calls++;
+			return response("   ");
+		} }), pi, undefined, undefined);
+		assert.equal(result.details.errorMessage, "empty response");
+		assert.equal(calls, 2);
+		assert.equal(getAdvisorUsesThisRun(), 1);
+	});
+
+	await t.test("aborted empty retry is terminal", async () => {
+		resetAdvisorUsage();
+		let calls = 0;
+		const result = await executeAdvisor(makeContext({ runtimeComplete: async () => {
+			calls++;
+			return calls === 1 ? response("   ") : response(undefined, "aborted");
+		} }), pi, undefined, undefined);
+		assert.equal(result.details.stopReason, "aborted");
+		assert.equal(result.details.errorMessage, "aborted");
+		assert.equal(calls, 2);
 	});
 
 	await t.test("thrown", async () => {

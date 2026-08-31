@@ -5,11 +5,12 @@ import { join } from "node:path";
 import test, { after, afterEach } from "node:test";
 
 import { __setAdvisorConfigPathForTests, loadAdvisorConfig, saveAdvisorConfig } from "../extensions/advisor/advisor/config.ts";
-import { registerAdvisorCommand } from "../extensions/advisor/advisor/command.ts";
+import { buildEffortItems, formatEntryLabel, registerAdvisorCommand } from "../extensions/advisor/advisor/command.ts";
 import {
 	DEFAULT_NUDGE_CONFIG,
 	NUDGE_PRESETS,
 	cwdMatchesQuietPath,
+	detectExactNudgePreset,
 	registerAdvisorNudges,
 	resetNudgeStateForTests,
 	resolveNudgeConfig,
@@ -69,6 +70,14 @@ test("preset contract exposes heavy, default, light, and off", () => {
 	assert.deepEqual(Object.keys(NUDGE_PRESETS), ["heavy", "default", "light", "off"]);
 	assert.equal(NUDGE_PRESETS.default, undefined);
 	assert.equal(NUDGE_PRESETS.off.disabled, true);
+});
+
+test("exact preset detection distinguishes hand-edited custom overrides", () => {
+	assert.equal(detectExactNudgePreset(undefined), "default");
+	assert.equal(detectExactNudgePreset(NUDGE_PRESETS.heavy), "heavy");
+	assert.equal(detectExactNudgePreset(NUDGE_PRESETS.light), "light");
+	assert.equal(detectExactNudgePreset(NUDGE_PRESETS.off), "off");
+	assert.equal(detectExactNudgePreset({ backoffToolCalls: 60 }), "custom");
 });
 
 test("event wiring sends one follow-up nudge and session backoff survives a new run", async () => {
@@ -153,6 +162,79 @@ test("inactive default mapping uses default-specific save and clear notification
 		assert.match(notifications.at(-1), expected);
 		assert.doesNotMatch(notifications.at(-1), /undefined/);
 	}
+});
+
+test("reasoning picker exposes only model-supported levels including max", () => {
+	const items = buildEffortItems({
+		provider: "anthropic",
+		id: "opus",
+		name: "Opus",
+		reasoning: true,
+		thinkingLevelMap: { minimal: null, low: null, xhigh: null, max: "max" },
+	});
+	assert.deepEqual(items.map((item) => item.value), ["__off__", "medium", "high", "max"]);
+	assert.equal(items[0].label, "off (no reasoning sent)");
+});
+
+test("mapping labels identify unsupported efforts and custom nudge overrides", () => {
+	const model = { provider: "anthropic", id: "opus", name: "Opus", reasoning: true };
+	assert.equal(
+		formatEntryLabel({ modelStub: "anthropic:opus", effort: "xhigh", nudge: { backoffToolCalls: 60 } }, [model]),
+		"Opus / xhigh (unsupported)  [nudge:custom]",
+	);
+});
+
+test("cancelling the effort picker keeps the chosen model with default effort", async () => {
+	writeFileSync(testConfigPath, "{}\n");
+	const choices = ["openai:gpt-5", "anthropic:opus", null, "heavy"];
+	let command;
+	const notifications = [];
+	const pi = {
+		getActiveTools: () => [],
+		registerCommand: (_name, registration) => { command = registration; },
+		setActiveTools: () => {},
+	};
+	registerAdvisorCommand(pi);
+	const models = [
+		{ provider: "openai", id: "gpt-5", name: "GPT 5", reasoning: false },
+		{ provider: "anthropic", id: "opus", name: "Opus", reasoning: true },
+	];
+	await command.handler("", {
+		hasUI: true,
+		model: models[0],
+		modelRegistry: { getAvailable: () => models },
+		ui: { custom: async () => choices.shift(), notify: (message) => notifications.push(message) },
+	});
+	assert.equal(loadAdvisorConfig().byExecutor["openai:gpt-5"].modelStub, "anthropic:opus");
+	assert.equal(loadAdvisorConfig().byExecutor["openai:gpt-5"].effort, undefined);
+	assert.ok(notifications.some((message) => /uses the model default/i.test(message)));
+});
+
+test("cancelling the nudge picker keeps its current preset and saves the model", async () => {
+	writeFileSync(testConfigPath, JSON.stringify({
+		byExecutor: { "openai:gpt-5": { modelStub: "anthropic:old", nudge: NUDGE_PRESETS.light } },
+	}));
+	const choices = ["openai:gpt-5", "anthropic:opus", null];
+	let command;
+	const pi = {
+		getActiveTools: () => [],
+		registerCommand: (_name, registration) => { command = registration; },
+		setActiveTools: () => {},
+	};
+	registerAdvisorCommand(pi);
+	const models = [
+		{ provider: "openai", id: "gpt-5", name: "GPT 5", reasoning: false },
+		{ provider: "anthropic", id: "old", name: "Old", reasoning: false },
+		{ provider: "anthropic", id: "opus", name: "Opus", reasoning: false },
+	];
+	await command.handler("", {
+		hasUI: true,
+		model: models[0],
+		modelRegistry: { getAvailable: () => models },
+		ui: { custom: async () => choices.shift(), notify: () => {} },
+	});
+	assert.equal(loadAdvisorConfig().byExecutor["openai:gpt-5"].modelStub, "anthropic:opus");
+	assert.deepEqual(loadAdvisorConfig().byExecutor["openai:gpt-5"].nudge, NUDGE_PRESETS.light);
 });
 
 test("UI preset selection persists on the chosen executor mapping", async () => {

@@ -1,10 +1,11 @@
 /** Restore and reconcile the advisor selected for an executor model. */
 
-import type { Api, Model } from "@earendil-works/pi-ai";
+import { getSupportedThinkingLevels, type Api, type Model } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { loadAdvisorConfig, modelStubOf, parseModelStub, resolveAdvisorEntry } from "./config.js";
+import { loadAdvisorConfig, modelStubOf, parseModelStub, resolveAdvisorEntry, validateAdvisorEffort } from "./config.js";
 import { reconcileAdvisorTool } from "./handlers.js";
 import {
+	errEffortUnsupported,
 	errModelUnavailable,
 	MSG_NO_ADVISOR_FOR_EXECUTOR,
 	msgAdvisorRestored,
@@ -64,15 +65,20 @@ export function applyAdvisorForExecutor(
 	}
 
 	const advisorStub = modelStubOf(model)!;
-	const unchanged = previousStub === advisorStub && previousEffort === entry.effort;
+	const supportedLevels = getSupportedThinkingLevels(model);
+	const effort = validateAdvisorEffort(entry.effort, `mapping for ${executorStub ?? "default"}`, supportedLevels);
+	if (entry.effort !== undefined && effort === undefined && ctx.hasUI) {
+		ctx.ui.notify(errEffortUnsupported(entry.effort, advisorStub), "warning");
+	}
+	const unchanged = previousStub === advisorStub && previousEffort === effort;
 	setAdvisorModel(model);
-	setAdvisorEffort(entry.effort);
+	setAdvisorEffort(effort);
 	reconcileAdvisorTool(pi, true);
 	if (unchanged || !ctx.hasUI) return;
 	ctx.ui.notify(
 		reason === "restore"
-			? msgAdvisorRestored(advisorStub, entry.effort, executorStub)
-			: msgAdvisorSwapped(advisorStub, entry.effort, executorStub ?? "unknown"),
+			? msgAdvisorRestored(advisorStub, effort, executorStub)
+			: msgAdvisorSwapped(advisorStub, effort, executorStub ?? "unknown"),
 		"info",
 	);
 }

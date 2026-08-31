@@ -5,68 +5,81 @@ Pi extension implementing the advisor-strategy pattern with **per-executor advis
 ## What this is
 
 Forked from [`@juicesharp/rpiv-advisor`](https://github.com/juicesharp/rpiv-mono/tree/main/packages/rpiv-advisor)
-v1.5.2. The upstream standalone repo (`juicesharp/rpiv-advisor`) is archived; active development moved to
+v2.1.0. The upstream standalone repo (`juicesharp/rpiv-advisor`) is archived; active development moved to
 `juicesharp/rpiv-mono`. See **Upstream** below.
 
-The one thing this fork adds that the upstream doesn't have: the advisor model and reasoning effort are keyed by the
-**current executor model**, so they swap automatically when you switch primary models. That's the core reason this fork
-exists.
+The one thing this fork adds that upstream does not have is that the advisor model, reasoning effort, and nudge policy
+are keyed by the **current executor model**, so they swap automatically when Pi switches primary models.
 
 ## Codebase layout
 
-```
+```text
 extensions/advisor/
-  index.ts          — Extension entrypoint; session_start + model_select handlers
-  advisor.ts        — Tool registration, /advisor command, per-executor config R/W
-  advisor-ui.ts     — TUI panels (model picker, effort picker)
+  index.ts                    — package entrypoint and lifecycle wiring
+  advisor-ui.ts               — filterable TUI panels
+  adaptive-thinking.ts        — LiteLLM adaptive-thinking normalization
+  guidance.ts                 — default selective-consultation guidance
+  fuzzy.ts                    — picker filtering
+  advisor/
+    command.ts                — `/advisor` per-executor configuration flow
+    config.ts                 — config schema, validation, and atomic persistence
+    context.ts                — canonical-context cleanup
+    curation.ts               — bounded transcript curation entrypoint
+    execute.ts                — auth-aware advisor completion and result envelope
+    execution-context.ts      — stage inference and recent tool signals
+    handlers.ts               — active-tool and model-switch reconciliation
+    inventory.ts              — bounded executor tool inventory
+    messages-curation.ts      — transcript trimming and summary retention
+    messages.ts               — shared constants and user-facing strings
+    nudges.ts                 — automatic nudge policy and run tracking
+    pi-compat.ts              — runtime completion and compatibility fallback
+    prompt.ts                 — advisor system prompt loading
+    register.ts               — advisor tool registration
+    restore.ts                — per-executor mapping restoration
+    state.ts                  — in-memory selection state
   prompts/
-    advisor-system.txt — System prompt injected into the advisor call
+    advisor-system.txt        — system prompt injected into advisor calls
 ```
 
-Config lives at `~/.pi/agent/pi-advisor.json` — colocated with other pi-plugin config, default 0644 perms (no
-credentials; only model identifiers and effort strings).
+Config lives at `~/.pi/agent/pi-advisor.json`. It contains model identifiers and behavior settings, not credentials, so
+normal user umask permissions are appropriate.
 
 ## Upstream: treat as citation-only
 
 The `upstream` remote points to `git@github.com:juicesharp/rpiv-mono.git`, but **do not `git merge` or `git pull` it**.
-The upstream is a monorepo; the relevant package lives under `packages/rpiv-advisor/` and pulling wholesale would dump
-unrelated packages and scaffolding into this repo.
+The upstream is a monorepo; the relevant package lives under `packages/rpiv-advisor/`, and merging wholesale would
+import unrelated packages and scaffolding.
 
-When upstream changes are worth incorporating:
+Inspect and port relevant upstream work selectively:
 
 ```bash
 git fetch upstream
-git log upstream/main -- packages/rpiv-advisor   # find relevant commits
-git cherry-pick <sha>                             # port selectively
+git log upstream/main -- packages/rpiv-advisor
+git show <sha> -- packages/rpiv-advisor
+git diff <old-upstream-ref>..upstream/main -- packages/rpiv-advisor
 ```
 
-Or to apply a whole batch:
+Adapt patches to this fork's standalone layout and preserve per-executor mappings, local config shape, context curation,
+execution signals, LiteLLM normalization, and nudge behavior. Do not copy upstream's entrypoint or package wholesale.
 
-```bash
-git diff HEAD upstream/main -- packages/rpiv-advisor  # review delta
-git checkout upstream/main -- packages/rpiv-advisor/  # apply wholesale
-git commit
-```
+## Current divergence from upstream
 
-The upstream is there for reference and cherry-picking only. If there's nothing relevant in `packages/rpiv-advisor`,
-ignore it.
+This fork intentionally retains:
 
-## Known gaps worth filling (backport candidates)
+- per-executor advisor model, effort, and nudge mappings;
+- `~/.pi/agent/pi-advisor.json` with colon-form `<provider>:<modelId>` keys;
+- bounded transcript curation with executor signals;
+- judgment-based guidance and quiet-path-aware automatic nudges;
+- LiteLLM adaptive-thinking normalization;
+- standalone packaging and Node test harness.
 
-Two things from [`RimuruW/pi-advisor`](https://github.com/RimuruW/pi-advisor) are better than ours:
-
-1. **Transcript curation** (`src/advisor-messages.ts`) — strips tool results, clamps long blocks, retains first+last N
-   messages, adds executor signals block. Makes advisor calls significantly cheaper and more focused. Worth porting
-   directly.
-
-2. **`shouldNudge` + `maxUsesPerRun`** — status bar hint that fires when code has changed but tests haven't run; per-run
-   usage cap. Low-effort quality-of-life add.
-
-Do not blindly merge their `index.ts` — it collapses everything into one file and drops the per-executor mapping
-entirely. Port the modules, not the entrypoint.
+Upstream fixes should be evaluated for behavior, not counted via repository-wide ahead/behind numbers. The repositories
+have unrelated histories, and the upstream remote includes the entire `rpiv-mono` monorepo.
 
 ## Dev notes
 
-- `peerDependencies` are not bundled; they come from the Pi install that loads this extension.
-- No build step — Pi loads `.ts` files directly via the `"pi"."extensions"` field in `package.json`.
-- Test with `pi install git:github.com/penumbral-labs/pi-advisor` or `pi -e ./extensions/advisor/index.ts`.
+- `peerDependencies` are not bundled; they come from the Pi installation that loads this extension.
+- Pi loads the TypeScript sources directly through the `package.json` `pi.extensions` entry; there is no compile step.
+- Run `npm test` for focused tests, package verification, and the isolated Pi loader smoke test.
+- Run `npm pack --dry-run` to inspect the distributable file set.
+- Smoke test locally with `pi -e ./extensions/advisor/index.ts` when interactive behavior changes.
