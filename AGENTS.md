@@ -62,6 +62,10 @@ git diff <old-upstream-ref>..upstream/main -- packages/rpiv-advisor
 Adapt patches to this fork's standalone layout and preserve per-executor mappings, local config shape, context curation,
 execution signals, LiteLLM normalization, and nudge behavior. Do not copy upstream's entrypoint or package wholesale.
 
+Every backport PR must set `upstream.baseline` in `package.json` to the last upstream commit whose
+`packages/rpiv-advisor` changes it ported. Drift tooling counts upstream commits after that baseline; a stale baseline
+reports drift that was already ported.
+
 ## Current divergence from upstream
 
 This fork intentionally retains:

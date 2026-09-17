@@ -2,6 +2,11 @@
 	"name": "@penumbral-labs/pi-advisor",
 	"version": "0.2.0",
 	"description": "Advisor-strategy pattern for Pi Agent with per-executor advisor models. Forked from @juicesharp/rpiv-advisor.",
+	"upstream": {
+		"repo": "juicesharp/rpiv-mono",
+		"path": "packages/rpiv-advisor",
+		"baseline": "bf3e8ae4c027a4fca18d1b4704f573bf550d30af"
+	},
 	"keywords": [
 		"pi-package",
 		"pi-extension",
