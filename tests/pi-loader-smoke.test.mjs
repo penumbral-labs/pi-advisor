@@ -10,7 +10,7 @@ const extensionPath = fileURLToPath(new URL("../extensions/advisor/index.ts", im
 
 function writeSmokeExtension(path) {
 	writeFileSync(path, `
-import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
+import { createAssistantMessageEventStream, getCurrentTools } from "@earendil-works/pi-ai";
 
 function response(model, text) {
 	const message = {
@@ -54,12 +54,12 @@ export default function smoke(pi) {
 				const mapped = serialized.includes("Current advisory stage:") && serialized.includes("SMOKE_TASK");
 				return response(model, mapped ? "SMOKE_ADVISOR_OK" : "SMOKE_ADVISOR_BAD_CONTEXT");
 			}
-			const hasAdvisor = context.tools?.some((tool) => tool.name === "advisor");
-			const tool = context.tools?.find((candidate) => candidate.name === "advisor");
+			// Providers receive tool declarations on transcript system messages, not context.tools.
+			const tool = getCurrentTools(context.messages).find((candidate) => candidate.name === "advisor");
 			const message = context.messages.at(-1);
 			const isToolResult = message?.role === "toolResult" && message?.toolName === "advisor";
 			if (isToolResult) return response(model, String(message.content?.[0]?.text ?? "SMOKE_MISSING_RESULT"));
-			if (!hasAdvisor || !tool) return response(model, "SMOKE_ADVISOR_NOT_ACTIVE");
+			if (!tool) return response(model, "SMOKE_ADVISOR_NOT_ACTIVE");
 			const call = {
 				role: "assistant",
 				content: [{ type: "toolCall", id: "smoke-advisor-call", name: "advisor", arguments: { stage: "initial" } }],
