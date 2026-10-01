@@ -20,6 +20,9 @@ All notable changes to this project are documented in this file.
 
 - Allow OAuth-backed advisor models to complete through Pi's auth-aware runtime without requiring a literal API key.
 - Retry a normal empty advisor response once with identical inputs before returning an empty-response failure.
+- Deliver automatic nudges with the next model request in the same run instead of as a follow-up, which started a new
+  turn after the final answer and caused subagent runners to abort and fail finished children.
+- Skip automatic nudges when the `advisor` tool is not active, such as in a subagent child with a tool allowlist.
 
 ## [0.2.0] - 2026-07-27
 

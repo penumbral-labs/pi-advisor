@@ -66,7 +66,9 @@ The extension can inject a short suggestion to consult the advisor after:
 - a long run of tool calls.
 
 Nudges are suggestions, not advisor calls. At most one fires per run, session-level backoff suppresses follow-up
-micro-turns, and an actual advisor call suppresses later nudges in that run. The `/advisor` picker offers:
+micro-turns, and an actual advisor call suppresses later nudges in that run. A nudge joins the next model request in the
+same run, so it never starts a turn after the final answer. Sessions where the `advisor` tool is not active, such as a
+subagent child whose tool allowlist omits it, are never nudged. The `/advisor` picker offers:
 
 | Preset    | Pre-execution | Mutation burst | Long run | Backoff |
 | --------- | ------------: | -------------: | -------: | ------: |
@@ -165,7 +167,7 @@ and that your user can write `pi-advisor.json`.
 ### Nudges are too frequent or absent
 
 Choose a different preset in `/advisor`, or inspect top-level and per-executor `nudge` values. Also check `quietPaths`,
-`maxUsesPerRun`, and whether an advisor call already happened in the current run.
+`maxUsesPerRun`, whether the `advisor` tool is active, and whether an advisor call already happened in the current run.
 
 ## Development
 
