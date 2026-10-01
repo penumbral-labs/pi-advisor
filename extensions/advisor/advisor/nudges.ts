@@ -6,7 +6,7 @@ import { loadAdvisorConfig, onAdvisorConfigSaved, resolveAdvisorEntry, type Advi
 import { getRunToolEvents, pushRunToolEvent, resetRunToolEvents, type RunToolEvent } from "./execution-context.js";
 import { getAdvisorUsesThisRun, MAX_USES_PER_RUN_DEFAULT, resetAdvisorUsage } from "./execute.js";
 import { ADVISOR_TOOL_NAME } from "./messages.js";
-import { getActiveExecutorKey, getAdvisorModel } from "./state.js";
+import { getActiveExecutorKey } from "./state.js";
 
 export interface NudgeConfig {
 	disabled?: boolean;
@@ -176,17 +176,19 @@ export function registerAdvisorNudges(pi: ExtensionAPI): void {
 		if (cwdMatchesQuietPath(ctx.cwd, config.quietPaths, homedir())) return;
 		const nudge = resolveNudgeConfig(config, getActiveExecutorKey());
 		if (runtime.sessionLastNudgeAtCount !== undefined && runtime.sessionToolCallCount - runtime.sessionLastNudgeAtCount < nudge.backoffToolCalls) return;
+		// The configured model alone is not enough: a tool allowlist (e.g. a subagent child) can keep `advisor` inactive.
 		const hint = shouldNudge(
 			getRunToolEvents(),
 			getAdvisorUsesThisRun(),
-			getAdvisorModel() !== undefined,
+			pi.getActiveTools().includes(ADVISOR_TOOL_NAME),
 			config.maxUsesPerRun ?? MAX_USES_PER_RUN_DEFAULT,
 			nudge,
 		);
 		if (!hint || runtime.nudgedThisRun) return;
 		runtime.nudgedThisRun = true;
 		runtime.sessionLastNudgeAtCount = runtime.sessionToolCallCount;
-		pi.sendMessage({ customType: "advisor-nudge", content: hint, display: true }, { deliverAs: "followUp" });
+		// Steer joins the LLM request that follows this tool batch; a follow-up would start a new turn after the final answer.
+		pi.sendMessage({ customType: "advisor-nudge", content: hint, display: true }, { deliverAs: "steer" });
 		ctx.ui.setStatus("advisor-nudge", "advisor nudged ↗");
 	});
 	pi.on("session_start", async () => resetNudgeSessionState());

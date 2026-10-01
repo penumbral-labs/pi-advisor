@@ -23,13 +23,14 @@ const testDirectory = mkdtempSync(join(tmpdir(), "pi-advisor-nudges-"));
 const testConfigPath = join(testDirectory, "pi-advisor.json");
 const restoreConfigPath = __setAdvisorConfigPathForTests(testConfigPath);
 
-function harness() {
+function harness({ activeTools = ["read", "edit", "write", "bash", "advisor"] } = {}) {
 	const events = new Map();
 	const messages = [];
 	const statuses = [];
 	const pi = {
 		on: (name, handler) => { events.set(name, handler); },
 		sendMessage: (message, options) => { messages.push([message, options]); },
+		getActiveTools: () => activeTools,
 	};
 	const ctx = { cwd: "/repo", ui: { setStatus: (key, value) => statuses.push([key, value]) } };
 	return { pi, ctx, events, messages, statuses };
@@ -80,7 +81,7 @@ test("exact preset detection distinguishes hand-edited custom overrides", () => 
 	assert.equal(detectExactNudgePreset({ backoffToolCalls: 60 }), "custom");
 });
 
-test("event wiring sends one follow-up nudge and session backoff survives a new run", async () => {
+test("event wiring sends one steered nudge and session backoff survives a new run", async () => {
 	writeFileSync(testConfigPath, JSON.stringify({
 		default: { modelStub: "anthropic:opus" },
 		nudge: { preExecution: false, mutationBurst: 1, longRunToolCalls: 99, backoffToolCalls: 3 },
@@ -92,7 +93,7 @@ test("event wiring sends one follow-up nudge and session backoff survives a new 
 	await h.events.get("agent_start")({}, h.ctx);
 	await executeTool(h, "edit", "1", { path: "a.ts" });
 	assert.equal(h.messages.length, 1);
-	assert.equal(h.messages[0][1].deliverAs, "followUp");
+	assert.equal(h.messages[0][1].deliverAs, "steer", "a follow-up would start a new turn after the final answer");
 	await executeTool(h, "edit", "duplicate", { path: "duplicate.ts" });
 	assert.equal(h.messages.length, 1, "only one automatic nudge may be sent in a run");
 
@@ -104,6 +105,20 @@ test("event wiring sends one follow-up nudge and session backoff survives a new 
 	await h.events.get("agent_start")({}, h.ctx);
 	await executeTool(h, "edit", "5", { path: "c.ts" });
 	assert.equal(h.messages.length, 2);
+});
+
+test("no nudge when the advisor tool is inactive even though an advisor model is configured", async () => {
+	writeFileSync(testConfigPath, JSON.stringify({
+		default: { modelStub: "anthropic:opus" },
+		nudge: { preExecution: false, mutationBurst: 99, longRunToolCalls: 3 },
+	}));
+	setAdvisorModel({ provider: "anthropic", id: "opus", name: "Opus" });
+	const h = harness({ activeTools: ["read", "mcp"] });
+	registerAdvisorNudges(h.pi);
+	await h.events.get("session_start")({}, h.ctx);
+	await h.events.get("agent_start")({}, h.ctx);
+	for (const id of ["1", "2", "3", "4"]) await executeTool(h, "mcp", id);
+	assert.equal(h.messages.length, 0, "a tool allowlist without advisor must not be told to call advisor");
 });
 
 test("nudge config is cached across tool calls and refreshed after saveAdvisorConfig", async () => {
